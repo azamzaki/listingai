@@ -93,6 +93,7 @@ class App:
         self.csrf = secrets.token_urlsafe(24)
         self.base_url = "http://127.0.0.1:8321/"
         self.flash: Optional[tuple[str, bool]] = None
+        self.last_report: Optional[dict] = None
         self.settings: Settings = load_settings()
         self.campaigns: list[Campaign] = load_campaigns()
         stored = load_store() or []
@@ -207,6 +208,8 @@ class App:
         )
         check = (f'<form class="inline" method="post" action="/settings/email/check"><input type="hidden" name="csrf" value="{c}">'
                  f'<button class="b" type="submit">Check email now</button></form>') if connected else ""
+        reread = (f'<form class="inline" method="post" action="/settings/email/reread"><input type="hidden" name="csrf" value="{c}">'
+                  f'<button class="b" type="submit">Re-read last 14 days</button></form>') if connected else ""
         disconnect = (f'<form class="inline" method="post" action="/settings/email/remove"><input type="hidden" name="csrf" value="{c}">'
                       f'<button class="b danger" type="submit">Disconnect email</button></form>') if connected else ""
         return f"""
@@ -232,14 +235,40 @@ class App:
     <div class="row" style="grid-column:1/-1">{sites}</div>
     <div class="row" style="grid-column:1/-1"><button class="b primary" type="submit">Save email settings</button></div>
   </form>
-  <div class="row">{check}{disconnect}</div>
+  <div class="row">{check}{reread}{disconnect}</div>
+  {self._report_html()}
 </section>"""
 
+    def _report_html(self) -> str:
+        r = self.last_report
+        if not r:
+            return ""
+        per_site = " · ".join(f"{_esc(k)}: <b>{v}</b> email{'s' if v != 1 else ''}" for k, v in r["per_site"].items())
+        rows = "".join(
+            f"<tr><td>{_esc(e['from'])}</td><td>{_esc(e['subject'])}</td>"
+            f"<td class='num'>{'' if e['listings'] is None else e['listings']}</td><td>{_esc(e['note'])}</td></tr>"
+            for e in r["emails"][:30]
+        ) or "<tr><td colspan='4'>No alert emails found in the last 14 days.</td></tr>"
+        outside = ""
+        if r["outside"]:
+            items = ", ".join(f"{_esc(loc)}{f' (RM{p:,})' if p else ''}" for loc, p in r["outside"])
+            outside = (f"<p>Added but not in any campaign (place or price doesn't match): {items}. "
+                       f"They are still on the Dashboard; add the place to a campaign or widen its price range.</p>")
+        return f"""<div style="display:flex;flex-direction:column;gap:8px">
+  <h3 style="margin:8px 0 0;font:700 15px var(--display)">Last check · {_esc(r['at'])}</h3>
+  <p>Alert emails in the last 14 days: {per_site}</p>
+  <p>{r['added']} new listings added, {r['dupes']} already in ListingAI, {r['in_campaigns']} of the new ones in your campaigns.</p>
+  {outside}
+  <div style="overflow-x:auto"><table><thead><tr><th>From</th><th>Subject</th><th>Listings found</th><th></th></tr></thead>
+  <tbody>{rows}</tbody></table></div>
+</div>"""
+
     # --- email alerts -------------------------------------------------------
-    def fetch_email(self):
+    def fetch_email(self, reread: bool = False):
         """Network part of an email check; runs without holding the lock."""
         s = self.settings
-        return fetch_alert_items(s.email_address, s.email_app_password, s.email_imap_host, s.email_sites, s.email_seen)
+        return fetch_alert_items(s.email_address, s.email_app_password, s.email_imap_host, s.email_sites, s.email_seen,
+                                 reread=reread)
 
     def add_alert_items(self, result) -> tuple[int, int]:
         """Add fetched alert listings. Returns (added, skipped as duplicates). Call with the lock held."""
@@ -273,17 +302,31 @@ class App:
         self.refresh()
         return added, dupes
 
-    def check_email_now(self) -> str:
+    def check_email_now(self, reread: bool = False) -> str:
         try:
-            result = self.fetch_email()
+            result = self.fetch_email(reread)
         except MailError as e:
+            self.last_report = None
             return str(e)
         with self.lock:
+            before = {l.id for l in self.listings}
             added, dupes = self.add_alert_items(result)
+            new = [l for l in self.listings if l.id not in before]
+            in_campaigns = sum(1 for l in new if l.campaign_ids)
+            self.last_report = {"at": datetime.now().strftime("%d %b %H:%M"), "per_site": result.found_per_site,
+                                "emails": result.report, "added": added, "dupes": dupes, "in_campaigns": in_campaigns,
+                                "outside": [(l.location or "unknown place", l.price) for l in new if not l.campaign_ids][:10]}
         if not result.emails_read:
-            return "No new alert emails."
-        return (f"Read {result.emails_read} alert email{'s' if result.emails_read != 1 else ''}: "
-                f"{added} new listing{'s' if added != 1 else ''} added" + (f", {dupes} already in ListingAI." if dupes else "."))
+            total = sum(result.found_per_site.values())
+            return ("No alert emails from the property sites in the last 14 days." if not total
+                    else "No new alert emails since the last check.")
+        msg = (f"Read {result.emails_read} alert email{'s' if result.emails_read != 1 else ''}: "
+               f"{added} new listing{'s' if added != 1 else ''} added")
+        if dupes:
+            msg += f", {dupes} already in ListingAI"
+        if added and self.campaigns:
+            msg += f", {in_campaigns} in your campaigns"
+        return msg + "."
 
     def campaigns_page(self, edit_id: str = "") -> str:
         c = self.csrf
@@ -354,7 +397,12 @@ document.querySelectorAll('.preset').forEach(function(b){b.addEventListener('cli
   if(!name.value.trim()) name.value=b.dataset.name;
 });});
 </script>"""
-        return self.shell("Campaigns", "/campaigns", f'{form}<section class="camps">{listing}</section>{script}')
+        total = len(self.listings)
+        in_any = sum(1 for l in self.listings if l.campaign_ids)
+        summary = (f'<p class="muted">{total} listing{"s" if total != 1 else ""} in ListingAI, {in_any} in a campaign. '
+                   + ("Nothing has been added yet: paste posts on Add listing or Import posts, or connect alert emails in Settings.</p>"
+                      if not total else "Listings outside every campaign are still on the Dashboard.</p>"))
+        return self.shell("Campaigns", "/campaigns", f'{summary}{form}<section class="camps">{listing}</section>{script}')
 
     def add_page(self, prefill: Optional[dict[str, str]] = None) -> str:
         c = self.csrf
@@ -677,8 +725,8 @@ def make_handler(app: App):
             if not secrets.compare_digest(form.get("csrf", ""), app.csrf):
                 return self._send(403, "This form has expired. Go back and reload the page.")
             path = urlparse(self.path).path
-            if path == "/settings/email/check":
-                message = app.check_email_now()
+            if path in ("/settings/email/check", "/settings/email/reread"):
+                message = app.check_email_now(reread=path.endswith("reread"))
                 with app.lock:
                     app.say(message, error=message.startswith(("Add your", "Choose", "Could not", "The mailbox")))
                 return self._send(303, location="/settings")

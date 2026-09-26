@@ -12,7 +12,7 @@ import email
 import email.utils
 import imaplib
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from email.header import decode_header, make_header
 from html.parser import HTMLParser
@@ -176,6 +176,9 @@ class FetchResult:
     items: list[AlertItem]
     emails_read: int
     new_seen: list[str]
+    # What the check saw, for the Settings page: one row per alert email.
+    report: list[dict] = field(default_factory=list)
+    found_per_site: dict = field(default_factory=dict)
 
 
 class MailError(Exception):
@@ -186,7 +189,7 @@ ImapFactory = Callable[[str], imaplib.IMAP4]
 
 
 def fetch_alert_items(address: str, app_password: str, host: str, sites: Iterable[str], seen: Iterable[str],
-                      days: int = 14, imap_factory: Optional[ImapFactory] = None) -> FetchResult:
+                      days: int = 14, imap_factory: Optional[ImapFactory] = None, reread: bool = False) -> FetchResult:
     """Read alert emails from the last `days` days that have not been imported yet."""
     if not address or not app_password:
         raise MailError("Add your email address and app password in Settings first.")
@@ -210,13 +213,18 @@ def fetch_alert_items(address: str, app_password: str, host: str, sites: Iterabl
             imap.select("INBOX", readonly=True)
         since = (datetime.now() - timedelta(days=days)).strftime("%d-%b-%Y")
         ids: list[bytes] = []
+        found_per_site: dict[str, int] = {}
         for key in sites:
+            site_ids: list[bytes] = []
             for domain in SITES[key].sender_domains:
                 status, data = imap.search(None, "SINCE", since, "FROM", f'"{domain}"')
                 if status == "OK" and data and data[0]:
-                    ids.extend(data[0].split())
+                    site_ids.extend(data[0].split())
+            found_per_site[SITES[key].name] = len(set(site_ids))
+            ids.extend(site_ids)
         items: list[AlertItem] = []
         new_seen: list[str] = []
+        report: list[dict] = []
         read = 0
         for msg_id in dict.fromkeys(ids):  # unique, order kept
             status, data = imap.fetch(msg_id, "(BODY.PEEK[])")  # PEEK keeps the email unread
@@ -224,16 +232,28 @@ def fetch_alert_items(address: str, app_password: str, host: str, sites: Iterabl
                 continue
             msg = email.message_from_bytes(data[0][1])
             mid = msg.get("Message-ID") or f"{msg.get('Date')}|{msg.get('Subject')}"
-            if mid in seen or mid in new_seen:
+            row = {"from": _decode(msg.get("From")), "subject": _decode(msg.get("Subject"))[:120],
+                   "date": msg.get("Date", ""), "listings": None, "note": ""}
+            if mid in new_seen:
                 continue
-            site = site_for_sender(_decode(msg.get("From")), sites)
+            if mid in seen and not reread:
+                row["note"] = "already read"
+                report.append(row)
+                continue
+            site = site_for_sender(row["from"], sites)
             if site is None:
+                row["note"] = "not from a property site"
+                report.append(row)
                 continue
             body, is_html = _body(msg)
-            items.extend(parse_alert(site, body, is_html))
-            new_seen.append(mid)
+            found = parse_alert(site, body, is_html)
+            items.extend(found)
+            row["listings"] = len(found)
+            report.append(row)
+            if mid not in seen:
+                new_seen.append(mid)
             read += 1
-        return FetchResult(items, read, new_seen)
+        return FetchResult(items, read, new_seen, report, found_per_site)
     finally:
         try:
             imap.logout()

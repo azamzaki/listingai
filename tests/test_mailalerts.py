@@ -133,13 +133,19 @@ class AppFlow(unittest.TestCase):
             })
             with mock.patch("listingai.mailalerts.imaplib.IMAP4_SSL", imap):
                 msg = app.check_email_now()
-            self.assertEqual(msg, "Read 2 alert emails: 3 new listings added.")
+            self.assertEqual(msg, "Read 2 alert emails: 3 new listings added, 2 in your campaigns.")
+            page = app.settings_page()
+            self.assertIn("Last check", page)
+            self.assertIn("PropertyGuru: <b>1</b> email", page)
+            self.assertIn("Bukit Mertajam (RM260,000)", page)  # added but outside the Kedah campaign
             self.assertEqual(sorted(l.source for l in app.listings),
                              ["Mudah email alert", "PropertyGuru email alert", "PropertyGuru email alert"])
             in_campaign = sorted(l.location for l in app.listings if l.campaign_ids)
             self.assertEqual(in_campaign, ["Kulim", "Taman Ria Jaya"])  # Taman Ria Jaya post names Sungai Petani
             with mock.patch("listingai.mailalerts.imaplib.IMAP4_SSL", imap):
-                self.assertEqual(app.check_email_now(), "No new alert emails.")
+                self.assertEqual(app.check_email_now(), "No new alert emails since the last check.")
+                self.assertIn("already read", app.settings_page())
+                self.assertIn("3 already in ListingAI", app.check_email_now(reread=True))
             app.post("/listings/delete", {"id": app.listings[0].id})
             self.assertEqual(len(app.listings), 2)
             self.assertNotIn("goodpass", app.settings_page())
