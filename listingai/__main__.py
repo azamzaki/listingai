@@ -71,7 +71,7 @@ def serve_main(argv: list[str]) -> None:
     from .server import serve
 
     parser = argparse.ArgumentParser(prog="python -m listingai serve", description="Run the ListingAI app on this computer.")
-    parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument("--port", type=int, default=8321)
     parser.add_argument("--csv", help="also import the listings in this CSV file (duplicates are skipped)")
     parser.add_argument("--no-open", action="store_true", help="do not open the browser")
     args = parser.parse_args(argv)

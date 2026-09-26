@@ -343,6 +343,25 @@ class WebApp(unittest.TestCase):
         self.assertEqual(self.app.listings, [])
         self.assertIn("No listings yet", self.get("/"))
 
+    def test_skips_port_where_another_program_answers(self):
+        import socket
+        from listingai.server import bind_server, port_answers
+        try:  # e.g. a FastAPI app listening on IPv6 only
+            other = socket.socket(socket.AF_INET6)
+            other.bind(("::1", 0))
+        except OSError:  # no IPv6 here: another program on IPv4 instead
+            other = socket.socket(socket.AF_INET)
+            other.bind(("127.0.0.1", 0))
+        other.listen()
+        port = other.getsockname()[1]
+        try:
+            self.assertTrue(port_answers(port))
+            srv = bind_server(self.app, port)
+            self.assertNotEqual(srv.server_address[1], port)
+            srv.server_close()
+        finally:
+            other.close()
+
     def test_busy_port_falls_back_to_next(self):
         from listingai.server import bind_server
         busy = self.httpd.server_address[1]

@@ -17,7 +17,7 @@ python3 -m unittest
 python -m listingai serve
 ```
 
-This opens http://127.0.0.1:8000 in your browser. It runs only on your computer and has four pages:
+This opens http://127.0.0.1:8321 in your browser (or the next free port, which it prints). It runs only on your computer and has four pages:
 
 - **Dashboard**: every listing with its agent-intent status, score, evidence and filters
   (status, campaign, location, search, sort). "Re-check all with AI" appears once an OpenAI key is saved.

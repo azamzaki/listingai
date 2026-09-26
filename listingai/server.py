@@ -90,7 +90,7 @@ class App:
 
         self.lock = threading.Lock()
         self.csrf = secrets.token_urlsafe(24)
-        self.base_url = "http://127.0.0.1:8000/"
+        self.base_url = "http://127.0.0.1:8321/"
         self.flash: Optional[tuple[str, bool]] = None
         self.settings: Settings = load_settings()
         self.campaigns: list[Campaign] = load_campaigns()
@@ -572,10 +572,23 @@ class _Server(ThreadingHTTPServer):
         super().server_bind()
 
 
+def port_answers(port: int) -> bool:
+    """True if any program already accepts connections on this port (IPv4 or IPv6 localhost)."""
+    for host in ("127.0.0.1", "::1"):
+        try:
+            with socket.create_connection((host, port), timeout=0.3):
+                return True
+        except OSError:
+            continue
+    return False
+
+
 def bind_server(app: "App", port: int, attempts: int = 20) -> ThreadingHTTPServer:
-    """Bind to `port`, or the next free port if it is taken."""
+    """Bind to `port`, or the next port that no other program is using."""
     last: Optional[OSError] = None
     for candidate in range(port, port + attempts):
+        if port_answers(candidate):
+            continue
         try:
             return _Server(("127.0.0.1", candidate), make_handler(app))
         except OSError as e:
@@ -583,7 +596,7 @@ def bind_server(app: "App", port: int, attempts: int = 20) -> ThreadingHTTPServe
     raise OSError(f"No free port between {port} and {port + attempts - 1}: {last}")
 
 
-def serve(port: int = 8000, import_csv: Optional[Path] = None, open_browser: bool = True) -> None:
+def serve(port: int = 8321, import_csv: Optional[Path] = None, open_browser: bool = True) -> None:
     app = App(import_csv)
     if app.removed_examples:
         print(f"Removed {app.removed_examples} example listings.")
