@@ -42,6 +42,10 @@ This opens http://127.0.0.1:8321 in your browser (or the next free port, which i
   link, tagged e.g. "PropertyGuru email alert") and is matched to your campaigns. Alerts are read every
   15/30/60 minutes while the app runs, or with **Check email now**. Emails are read-only and stay unread;
   ListingAI never visits the property sites itself.
+  **Web search**: with a Brave Search API key, ListingAI searches the web for each place in your active
+  campaigns (e.g. `"Sungai Petani" rumah dijual owner`, past week) every 6/12/24 hours or on demand, and adds
+  results that look like property listings. It uses only the title, description and link from the official
+  search API; it never opens or crawls the pages. Google is not used because it does not allow automated searching.
 
 Your data (settings, campaigns, listings) is stored in `~/.listingai` (set `LISTINGAI_HOME` to change it).
 The API key is stored only there, or read from the `OPENAI_API_KEY` environment variable; it is never
@@ -90,6 +94,7 @@ It follows the system light/dark theme and works on phones.
 | `listingai/regions.py` | Place names by region, presets, abbreviation-aware matching |
 | `listingai/extract.py` | Reads phone, email, price, location and owner from post text |
 | `listingai/mailalerts.py` | Reads property-site alert emails over IMAP |
+| `listingai/websearch.py` | Finds listings through the Brave Search API |
 | `listingai/llm.py` | Optional OpenAI second opinion |
 | `listingai/settings.py` | Local settings and listing storage |
 | `listingai/server.py` | Local web app (`python -m listingai serve`) |

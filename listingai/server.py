@@ -29,6 +29,7 @@ from .exclusive_agent import classify_exclusive_agent
 from .examples import is_example
 from .extract import extract_listing, extract_with_rules, split_posts
 from .mailalerts import SITES, MailError, fetch_alert_items
+from .websearch import SearchError, run_search
 from .llm import OpenAIError, classify_with_ai, test_api_key
 from .models import EvidenceSource, ExclusiveAgentStatus as S, Listing, TextEvidence
 from .settings import Settings, data_dir, load_settings, load_store, save_settings, save_store
@@ -94,6 +95,7 @@ class App:
         self.base_url = "http://127.0.0.1:8321/"
         self.flash: Optional[tuple[str, bool]] = None
         self.last_report: Optional[dict] = None
+        self.last_web_report: Optional[dict] = None
         self.settings: Settings = load_settings()
         self.campaigns: list[Campaign] = load_campaigns()
         stored = load_store() or []
@@ -190,7 +192,8 @@ class App:
   </form>
   <div class="row">{test}{remove}</div>
 </section>
-{self._email_section()}"""
+{self._email_section()}
+{self._web_section()}"""
         return self.shell("Settings", "/settings", body)
 
     def _email_section(self) -> str:
@@ -262,6 +265,93 @@ class App:
   <div style="overflow-x:auto"><table><thead><tr><th>From</th><th>Subject</th><th>Listings found</th><th></th></tr></thead>
   <tbody>{rows}</tbody></table></div>
 </div>"""
+
+    def _web_section(self) -> str:
+        s, c = self.settings, self.csrf
+        on = bool(s.brave_api_key)
+        places = sorted({p for camp in self.campaigns if camp.active for p in camp.locations})
+        status = (f'<span class="status on"><span class="dot"></span>Brave Search key saved (…{_esc(s.brave_api_key[-4:])})</span>'
+                  if on else '<span class="status"><span class="dot"></span>Not connected</span>')
+        last = f'<span class="muted">Last search {_esc(s.web_last_run[:16].replace("T", " "))}</span>' if s.web_last_run else ""
+        now_btn = (f'<form class="inline" method="post" action="/settings/web/run"><input type="hidden" name="csrf" value="{c}">'
+                   f'<button class="b" type="submit">Search the web now</button></form>') if on else ""
+        remove = (f'<form class="inline" method="post" action="/settings/web/remove"><input type="hidden" name="csrf" value="{c}">'
+                  f'<button class="b danger" type="submit">Remove key</button></form>') if on else ""
+        report = ""
+        r = self.last_web_report
+        if r:
+            rows = "".join(f"<tr><td>{_esc(q)}</td><td class='num'>{n}</td></tr>" for q, n in r["queries"])
+            report = (f"<h3 style='margin:8px 0 0;font:700 15px var(--display)'>Last search · {_esc(r['at'])}</h3>"
+                      f"<p>{r['added']} new listings added, {r['dupes']} already in ListingAI, {r['in_campaigns']} in your campaigns.</p>"
+                      f"<div style='overflow-x:auto'><table><thead><tr><th>Search</th><th>Property results</th></tr></thead>"
+                      f"<tbody>{rows}</tbody></table></div>")
+        every = "".join(f'<option value="{h}"{" selected" if h == s.web_search_hours else ""}>{label}</option>'
+                        for h, label in [(6, "6 hours"), (12, "12 hours"), (24, "1 day"), (0, "Only when I click Search")])
+        return f"""
+<section class="card">
+  <h2>Web search</h2>
+  <p>ListingAI searches the web for each place in your active campaigns ({len(places)} places, e.g.
+  “{_esc(places[0]) if places else 'Sungai Petani'} rumah dijual owner”) and adds property results from the past week
+  to the dashboard. It uses Brave Search's official API, because Google does not allow automated searching.</p>
+  <p class="muted">Search engines list Mudah, PropertyGuru and iProperty pages but almost no Facebook group posts, and
+  results show a title, short description and link, rarely a phone number. Each search uses one query from your Brave
+  plan; each run makes up to 15 and continues with the next places on the following run.
+  Get a key at api-dashboard.search.brave.com.</p>
+  <div class="row">{status}{last}</div>
+  <form method="post" action="/settings/web" class="grid2" autocomplete="off">
+    <input type="hidden" name="csrf" value="{c}">
+    <label class="field" for="w_key">Brave Search API key
+      <input id="w_key" name="brave_api_key" type="password" spellcheck="false"
+        placeholder="{'Leave blank to keep the saved key' if on else 'BSA…'}"></label>
+    <label class="field" for="w_every">Search every
+      <select id="w_every" name="web_search_hours">{every}</select></label>
+    <div class="row" style="grid-column:1/-1"><button class="b primary" type="submit">Save web search settings</button></div>
+  </form>
+  <div class="row">{now_btn}{remove}</div>
+  {report}
+</section>"""
+
+    def search_web_now(self) -> str:
+        with self.lock:
+            places = [p for camp in self.campaigns if camp.active for p in camp.locations]
+            key, cursor = self.settings.brave_api_key, self.settings.web_cursor
+        try:
+            run = run_search(places, key, cursor)
+        except SearchError as e:
+            return str(e)
+        with self.lock:
+            known = {l.post_url for l in self.listings if l.post_url}
+            before = {l.id for l in self.listings}
+            added = dupes = 0
+            for r in run.results:
+                if r.url in known:
+                    dupes += 1
+                    continue
+                known.add(r.url)
+                text = f"{r.title}. {r.description}"
+                found = extract_with_rules(text, places)
+                listing = Listing(
+                    id=f"W{datetime.now().strftime('%y%m%d%H%M%S')}{secrets.token_hex(2)}",
+                    post_url=r.url, location=r.location or found.location or "", price=r.price, caption=text,
+                    is_direct_owner=bool(found.is_direct_owner), public_phone=found.phone, public_email=found.email,
+                    has_eligible_contact=bool(found.phone or found.email), matches_target_location=True,
+                    posted_at=datetime.now(timezone.utc), base_opportunity_score=65,
+                    source=f"Web search ({urlparse(r.url).netloc.removeprefix('www.')})",
+                )
+                self.listings.append(listing)
+                if found.phone or found.email:
+                    self.classify(listing, use_ai=True)
+                added += 1
+            self.settings.web_cursor = run.next_cursor
+            self.settings.web_last_run = datetime.now().isoformat(timespec="minutes")
+            save_settings(self.settings)
+            self.refresh()
+            new = [l for l in self.listings if l.id not in before]
+            in_campaigns = sum(1 for l in new if l.campaign_ids)
+            self.last_web_report = {"at": datetime.now().strftime("%d %b %H:%M"), "queries": run.queries,
+                                    "added": added, "dupes": dupes, "in_campaigns": in_campaigns}
+        return (f"Ran {len(run.queries)} searches: {added} new listing{'s' if added != 1 else ''} added"
+                + (f", {dupes} already in ListingAI" if dupes else "") + f", {in_campaigns} in your campaigns.")
 
     # --- email alerts -------------------------------------------------------
     def fetch_email(self, reread: bool = False):
@@ -513,6 +603,21 @@ document.querySelectorAll('.preset').forEach(function(b){b.addEventListener('cli
             save_settings(s)
             self.say("Email settings saved. Click Check email now to test them.")
             return "/settings"
+        if path == "/settings/web":
+            if form.get("brave_api_key", "").strip():
+                self.settings.brave_api_key = form["brave_api_key"].strip()
+            try:
+                self.settings.web_search_hours = int(form.get("web_search_hours", "12"))
+            except ValueError:
+                pass
+            save_settings(self.settings)
+            self.say("Web search settings saved. Click Search the web now to try it.")
+            return "/settings"
+        if path == "/settings/web/remove":
+            self.settings.brave_api_key = ""
+            save_settings(self.settings)
+            self.say("Brave Search key removed from this computer.")
+            return "/settings"
         if path == "/settings/email/remove":
             self.settings.email_app_password = ""
             save_settings(self.settings)
@@ -725,6 +830,11 @@ def make_handler(app: App):
             if not secrets.compare_digest(form.get("csrf", ""), app.csrf):
                 return self._send(403, "This form has expired. Go back and reload the page.")
             path = urlparse(self.path).path
+            if path == "/settings/web/run":
+                message = app.search_web_now()
+                with app.lock:
+                    app.say(message, error=not message.startswith("Ran "))
+                return self._send(303, location="/settings")
             if path in ("/settings/email/check", "/settings/email/reread"):
                 message = app.check_email_now(reread=path.endswith("reread"))
                 with app.lock:
@@ -772,21 +882,22 @@ def bind_server(app: "App", port: int, attempts: int = 20) -> ThreadingHTTPServe
     raise OSError(f"No free port between {port} and {port + attempts - 1}: {last}")
 
 
-def _email_loop(app: App, tick: float = 60.0) -> None:
-    """Check alert emails on the chosen schedule while the app runs."""
+def _background_loop(app: App, tick: float = 60.0) -> None:
+    """Check alert emails and run web searches on their schedules while the app runs."""
     import time
 
-    last = 0.0
+    last_email = 0.0
+    last_web = time.time()  # first web search after one full interval, not at start-up
     while True:
         time.sleep(tick)
         s = app.settings
-        if not (s.email_address and s.email_app_password and s.email_check_minutes):
-            continue
-        if time.time() - last < s.email_check_minutes * 60:
-            continue
-        last = time.time()
-        message = app.check_email_now()
-        print(f"[{datetime.now():%H:%M}] Email alerts: {message}")
+        now = time.time()
+        if s.email_address and s.email_app_password and s.email_check_minutes and now - last_email >= s.email_check_minutes * 60:
+            last_email = now
+            print(f"[{datetime.now():%H:%M}] Email alerts: {app.check_email_now()}")
+        if s.brave_api_key and s.web_search_hours and now - last_web >= s.web_search_hours * 3600:
+            last_web = now
+            print(f"[{datetime.now():%H:%M}] Web search: {app.search_web_now()}")
 
 
 def serve(port: int = 8321, import_csv: Optional[Path] = None, open_browser: bool = True) -> None:
@@ -800,7 +911,7 @@ def serve(port: int = 8321, import_csv: Optional[Path] = None, open_browser: boo
     if actual != port:
         print(f"Port {port} is used by another program, so ListingAI is using port {actual} instead.")
     print(f"ListingAI is running at {url}\nPress Ctrl+C to stop.")
-    threading.Thread(target=_email_loop, args=(app,), daemon=True).start()
+    threading.Thread(target=_background_loop, args=(app,), daemon=True).start()
     if open_browser:
         webbrowser.open(url)
     try:

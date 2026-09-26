@@ -45,6 +45,11 @@ class Settings:
     email_check_minutes: int = 30
     email_seen: list = field(default_factory=list)  # Message-IDs already imported
     email_last_check: str = ""
+    # Web search through the Brave Search API.
+    brave_api_key: str = ""
+    web_search_hours: int = 12  # 0 = only when "Search the web now" is clicked
+    web_cursor: int = 0
+    web_last_run: str = ""
 
     @property
     def effective_key(self) -> str:
@@ -85,6 +90,10 @@ def load_settings() -> Settings:
         email_check_minutes=int(raw.get("email_check_minutes", defaults.email_check_minutes)),
         email_seen=list(raw.get("email_seen", [])),
         email_last_check=raw.get("email_last_check", ""),
+        brave_api_key=raw.get("brave_api_key", ""),
+        web_search_hours=int(raw.get("web_search_hours", defaults.web_search_hours)),
+        web_cursor=int(raw.get("web_cursor", 0)),
+        web_last_run=raw.get("web_last_run", ""),
     )
 
 
