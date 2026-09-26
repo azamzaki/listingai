@@ -174,12 +174,17 @@ class Dashboard(unittest.TestCase):
         self.assertEqual(len(filter_by_status(self.items)), 6)
 
     def test_html_shows_owner_instruction_and_filters(self):
-        page = render_dashboard_html(self.items, CFG)
+        page = render_dashboard_html(self.items, CFG, NOW)
         self.assertIn("Pemilik tidak mahu dihubungi oleh ejen", page)
         for status in S:
-            self.assertIn(f"value='{status.value}'", page)
-        self.assertLess(page.index("data-status='seeking_exclusive_agent'"), page.index("data-status='rejects_agents'"))
+            self.assertIn(f'data-status="{status.value}"', page)
+        self.assertLess(page.index('"status": "seeking_exclusive_agent"'), page.index('"status": "rejects_agents"'))
+        self.assertTrue(page.startswith("<!doctype html>"))
+        self.assertFalse(render_dashboard_html(self.items, CFG, NOW, full_document=False).startswith("<!doctype"))
 
+    def test_html_data_cannot_break_out_of_script(self):
+        page = render_dashboard_html([make("</script><script>alert(1)</script> Agents welcome")], CFG, NOW)
+        self.assertNotIn("</script><script>alert(1)", page)
 
 if __name__ == "__main__":
     unittest.main()

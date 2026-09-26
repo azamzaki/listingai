@@ -70,7 +70,7 @@ def main(argv: list[str] | None = None) -> None:
 
     listings = load_listings(Path(args.csv))
     out = Path(args.output).resolve()
-    out.write_text(render_dashboard_html(listings, DEFAULT_CONFIG), encoding="utf-8")
+    out.write_text(render_dashboard_html(listings, DEFAULT_CONFIG, source_name=Path(args.csv).name), encoding="utf-8")
 
     for l in listings:
         ea = l.exclusive_agent

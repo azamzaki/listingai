@@ -23,6 +23,12 @@ The CSV needs at least `id` and `caption`. Optional columns are `post_url`, `loc
 `scam_risk_score` and `base_score` (see `sample_listings.csv`). The terminal also lists each
 listing's status, whether it would trigger an exclusive-opportunity email, and the email subject.
 
+The dashboard shows summary counts, filter chips for every status, search, a location filter,
+sorting, and an "alert-ready only" toggle. Each listing shows its score, badges and the
+supporting phrase highlighted in the post. Click a listing to see the full evidence,
+confidence, score breakdown, alert checks, To Contact status and public contact details.
+It follows the system light/dark theme and works on phones.
+
 ## Modules
 
 | Module | Purpose |
