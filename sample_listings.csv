@@ -1,0 +1,8 @@
+id,post_url,location,price,caption,public_phone,public_email,is_direct_owner,in_target_location,posted_days_ago,scam_risk_score,base_score
+L1,https://facebook.com/post/1,Bangi,650000,"Owner jual rumah teres. Nak lantik seorang ejen sahaja. WhatsApp 012-3456789",012-3456789,,yes,yes,1,10,77
+L2,https://facebook.com/post/2,Kajang,520000,"Agents are welcome, boleh co-broke",013-2223344,,yes,yes,2,15,70
+L3,https://facebook.com/post/3,Bangi,700000,"Exclusive listing. Contact appointed agent: Ahmad Faizal REN 31234",019-8887766,,no,yes,1,5,65
+L4,https://facebook.com/post/4,Semenyih,450000,"Rumah teres 2 tingkat, direct owner, freehold",011-1234567,,yes,yes,3,20,72
+L5,https://facebook.com/post/5,Bangi,610000,"Ejen jangan hubungi. Direct buyer only",012-9998877,,yes,yes,1,10,75
+L6,https://facebook.com/post/6,Putrajaya,880000,"Looking for exclusive ag...",,owner@example.com,yes,yes,2,10,68
+L7,https://facebook.com/post/7,Bangi,590000,"Saya owner dan perlukan agent jualkan rumah",017-5554433,,yes,yes,0,8,80

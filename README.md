@@ -11,6 +11,18 @@ No third-party dependencies (Python 3.10+). Run tests with:
 python3 -m unittest
 ```
 
+## Run the dashboard
+
+```sh
+python -m listingai                  # builds dashboard.html from sample_listings.csv and opens it
+python -m listingai my_listings.csv  # use your own listings
+```
+
+The CSV needs at least `id` and `caption`. Optional columns are `post_url`, `location`, `price`,
+`public_phone`, `public_email`, `is_direct_owner`, `in_target_location`, `posted_days_ago`,
+`scam_risk_score` and `base_score` (see `sample_listings.csv`). The terminal also lists each
+listing's status, whether it would trigger an exclusive-opportunity email, and the email subject.
+
 ## Modules
 
 | Module | Purpose |
