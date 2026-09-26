@@ -40,7 +40,8 @@ This opens http://127.0.0.1:8000 in your browser. It runs only on your computer 
 
 Your data (settings, campaigns, listings) is stored in `~/.listingai` (set `LISTINGAI_HOME` to change it).
 The API key is stored only there, or read from the `OPENAI_API_KEY` environment variable; it is never
-put into a page or the repository. On first run the app loads `sample_listings.csv` as example data.
+put into a page or the repository. The app starts with no listings; `--csv file.csv` imports a CSV
+of your own (duplicates are skipped).
 
 ### How the OpenAI check works
 
@@ -53,13 +54,13 @@ If OpenAI can't be reached, the rule result is kept.
 ## Static dashboard from a CSV
 
 ```sh
-python -m listingai                  # builds dashboard.html from sample_listings.csv and opens it
+python -m listingai                  # builds dashboard.html from examples/sample_listings.csv and opens it
 python -m listingai my_listings.csv  # use your own listings
 ```
 
 The CSV needs at least `id` and `caption`. Optional columns are `post_url`, `location`, `price`,
 `public_phone`, `public_email`, `is_direct_owner`, `in_target_location`, `posted_days_ago`,
-`scam_risk_score` and `base_score` (see `sample_listings.csv`). The terminal also lists each
+`scam_risk_score` and `base_score` (see `examples/sample_listings.csv`). The terminal also lists each
 listing's status, whether it would trigger an exclusive-opportunity email, and the email subject.
 
 The dashboard shows summary counts, filter chips for every status, search, a location filter,
@@ -80,6 +81,7 @@ It follows the system light/dark theme and works on phones.
 | `listingai/pipeline.py` | To Contact gating, manual override, Review Queue |
 | `listingai/dashboard.py` | Badges, status filters, HTML dashboard |
 | `listingai/campaigns.py` | Location campaigns and matching |
+| `listingai/examples.py` | Removes example listings loaded by earlier versions |
 | `listingai/regions.py` | Place names by region, presets, abbreviation-aware matching |
 | `listingai/extract.py` | Reads phone, email, price, location and owner from post text |
 | `listingai/llm.py` | Optional OpenAI second opinion |

@@ -5,7 +5,7 @@
 
 Or build a one-off static dashboard from a CSV:
 
-    python -m listingai                       # uses sample_listings.csv
+    python -m listingai                       # uses examples/sample_listings.csv
     python -m listingai my_listings.csv       # your own data
     python -m listingai my.csv -o out.html --no-open
 
@@ -72,10 +72,10 @@ def serve_main(argv: list[str]) -> None:
 
     parser = argparse.ArgumentParser(prog="python -m listingai serve", description="Run the ListingAI app on this computer.")
     parser.add_argument("--port", type=int, default=8000)
-    parser.add_argument("--csv", default="sample_listings.csv", help="listings to start with on first run")
+    parser.add_argument("--csv", help="also import the listings in this CSV file (duplicates are skipped)")
     parser.add_argument("--no-open", action="store_true", help="do not open the browser")
     args = parser.parse_args(argv)
-    serve(args.port, Path(args.csv), not args.no_open)
+    serve(args.port, Path(args.csv) if args.csv else None, not args.no_open)
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -83,7 +83,7 @@ def main(argv: list[str] | None = None) -> None:
     if argv[:1] == ["serve"]:
         return serve_main(argv[1:])
     parser = argparse.ArgumentParser(prog="python -m listingai", description="Build the ListingAI dashboard.")
-    parser.add_argument("csv", nargs="?", default="sample_listings.csv", help="listings CSV (default: sample_listings.csv)")
+    parser.add_argument("csv", nargs="?", default="examples/sample_listings.csv", help="listings CSV (default: examples/sample_listings.csv)")
     parser.add_argument("-o", "--output", default="dashboard.html", help="output HTML file (default: dashboard.html)")
     parser.add_argument("--no-open", action="store_true", help="do not open the browser")
     args = parser.parse_args(argv)

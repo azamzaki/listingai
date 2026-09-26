@@ -323,14 +323,25 @@ class WebApp(unittest.TestCase):
         self.assertIn('value="https://facebook.com/groups/x"', page)
         self.assertIn("javascript:", self.get("/import"))
 
-    def test_remove_examples(self):
-        from listingai.__main__ import load_listings
+    def test_examples_removed_on_start_and_own_listings_kept(self):
         from pathlib import Path
-        self.app.listings = load_listings(Path("sample_listings.csv"))
-        self.post("/add", caption="Rumah Kulim RM350k owner 012-1112223", posted="")
-        self.assertIn("Remove example listings", self.get("/settings"))
-        self.post("/settings/examples")
-        self.assertEqual([l.caption for l in self.app.listings], ["Rumah Kulim RM350k owner 012-1112223"])
+        from listingai.__main__ import load_listings
+        from listingai.server import App
+        from listingai.settings import save_store
+        own = load_listings(Path("examples/sample_listings.csv"))[:1]
+        own[0].id = "M1"  # the user's own listing, even with the same text, is kept
+        examples = load_listings(Path("examples/sample_listings.csv"))
+        mine_with_example_id = Listing(id="L3", post_url="", location="Kulim", caption="My own post in Kulim")
+        save_store(examples + own + [mine_with_example_id])
+        app = App(None)
+        self.assertEqual(sorted(l.id for l in app.listings), ["L3", "M1"])
+        self.assertEqual(app.removed_examples, 10)
+        self.assertIn("Removed 10 example listings", app.take_flash())
+        self.assertEqual(len(App(None).listings), 2)  # saved
+
+    def test_starts_empty(self):
+        self.assertEqual(self.app.listings, [])
+        self.assertIn("No listings yet", self.get("/"))
 
     def test_busy_port_falls_back_to_next(self):
         from listingai.server import bind_server

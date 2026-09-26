@@ -26,6 +26,7 @@ from .campaigns import Campaign, apply_campaigns, load_campaigns, new_campaign, 
 from .config import DEFAULT_CONFIG
 from .dashboard import _TEMPLATE, render_dashboard_html
 from .exclusive_agent import classify_exclusive_agent
+from .examples import is_example
 from .extract import extract_listing, split_posts
 from .llm import OpenAIError, classify_with_ai, test_api_key
 from .models import EvidenceSource, ExclusiveAgentStatus as S, Listing, TextEvidence
@@ -75,11 +76,6 @@ def _int(value: str) -> Optional[int]:
         raise ValueError(f"'{value}' is not a number.") from None
 
 
-def _is_example(listing: Listing) -> bool:
-    """Listings seeded from sample_listings.csv (old ids L1…, new ids EX1…)."""
-    return re.fullmatch(r"(?:L|EX)\d+", listing.id) is not None
-
-
 def _valid_phone(phone: str) -> bool:
     return len(re.sub(r"\D", "", phone or "")) >= 9
 
@@ -89,7 +85,7 @@ def _valid_email(email: str) -> bool:
 
 
 class App:
-    def __init__(self, seed_csv: Optional[Path] = None):
+    def __init__(self, import_csv: Optional[Path] = None):
         from .__main__ import load_listings
 
         self.lock = threading.Lock()
@@ -98,9 +94,15 @@ class App:
         self.flash: Optional[tuple[str, bool]] = None
         self.settings: Settings = load_settings()
         self.campaigns: list[Campaign] = load_campaigns()
-        stored = load_store()
-        if stored is None:
-            stored = load_listings(seed_csv) if seed_csv and seed_csv.exists() else []
+        stored = load_store() or []
+        # Earlier versions loaded example listings on first start; drop them.
+        self.removed_examples = sum(1 for l in stored if is_example(l))
+        stored = [l for l in stored if not is_example(l)]
+        if self.removed_examples:
+            self.say(f"Removed {self.removed_examples} example listings. Only your own listings are shown now.")
+        if import_csv is not None:
+            known = {" ".join(l.caption.lower().split()) for l in stored}
+            stored += [l for l in load_listings(import_csv) if " ".join(l.caption.lower().split()) not in known]
         self.listings: list[Listing] = stored
         self.refresh()
 
@@ -166,11 +168,6 @@ class App:
                   f'<button class="b danger" type="submit">Remove key</button></form>') if s.openai_api_key else ""
         test = (f'<form class="inline" method="post" action="/settings/test"><input type="hidden" name="csrf" value="{c}">'
                 f'<button class="b" type="submit">Test connection</button></form>') if s.effective_key else ""
-        n_examples = sum(1 for l in self.listings if _is_example(l))
-        examples = (f"""<section class="card"><h2>Example listings</h2>
-  <p>{n_examples} example listings were loaded when ListingAI first started. Remove them once you have your own.</p>
-  <form method="post" action="/settings/examples"><input type="hidden" name="csrf" value="{c}">
-  <button class="b danger" type="submit">Remove example listings</button></form></section>""" if n_examples else "")
         body = f"""
 <section class="card">
   <h2>OpenAI connection</h2>
@@ -189,8 +186,7 @@ class App:
     <div class="row" style="grid-column:1/-1"><button class="b primary" type="submit">Save settings</button></div>
   </form>
   <div class="row">{test}{remove}</div>
-</section>
-{examples}"""
+</section>"""
         return self.shell("Settings", "/settings", body)
 
     def campaigns_page(self, edit_id: str = "") -> str:
@@ -358,12 +354,6 @@ document.querySelectorAll('.preset').forEach(function(b){b.addEventListener('cli
                 self.say(test_api_key(self.settings.effective_key, self.settings.openai_model))
             except OpenAIError as e:
                 self.say(str(e), True)
-            return "/settings"
-        if path == "/settings/examples":
-            before = len(self.listings)
-            self.listings = [l for l in self.listings if not _is_example(l)]
-            self.refresh()
-            self.say(f"Removed {before - len(self.listings)} example listings.")
             return "/settings"
         if path == "/settings/remove":
             self.settings.openai_api_key = ""
@@ -593,8 +583,10 @@ def bind_server(app: "App", port: int, attempts: int = 20) -> ThreadingHTTPServe
     raise OSError(f"No free port between {port} and {port + attempts - 1}: {last}")
 
 
-def serve(port: int = 8000, seed_csv: Optional[Path] = None, open_browser: bool = True) -> None:
-    app = App(seed_csv)
+def serve(port: int = 8000, import_csv: Optional[Path] = None, open_browser: bool = True) -> None:
+    app = App(import_csv)
+    if app.removed_examples:
+        print(f"Removed {app.removed_examples} example listings.")
     httpd = bind_server(app, port)
     actual = httpd.server_address[1]
     url = f"http://127.0.0.1:{actual}/"

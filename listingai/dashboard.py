@@ -479,7 +479,12 @@ dt{color:var(--ink-3)} dd{margin:0;font-weight:500;overflow-wrap:anywhere}
 
   function render(){
     var rows = visible();
-    if(!rows.length){ $('#list').innerHTML = '<div class="empty">No listings match these filters.</div>'; return; }
+    if(!rows.length){
+      $('#list').innerHTML = DATA.length
+        ? '<div class="empty">No listings match these filters.</div>'
+        : '<div class="empty">No listings yet. Use <b>Add listing</b> to paste a post, or <b>Import posts</b> to add many at once.</div>';
+      return;
+    }
     $('#list').innerHTML = rows.map(function(d){
       var tags = badge(d);
       if(d.review && d.status!=='uncertain') tags += '<span class="badge c-review"><span class="dot"></span>Perlu Semakan</span>';
