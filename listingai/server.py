@@ -11,6 +11,8 @@ from __future__ import annotations
 import html
 import re
 import secrets
+import socket
+import sys
 import threading
 import webbrowser
 from datetime import datetime, timezone
@@ -439,10 +441,35 @@ def make_handler(app: App):
     return Handler
 
 
+class _Server(ThreadingHTTPServer):
+    # On Windows, SO_REUSEADDR lets a second program bind a port that is already
+    # in use, so the browser may reach the other program. Use exclusive binding.
+    allow_reuse_address = sys.platform != "win32"
+
+    def server_bind(self):
+        if sys.platform == "win32" and hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        super().server_bind()
+
+
+def bind_server(app: "App", port: int, attempts: int = 20) -> ThreadingHTTPServer:
+    """Bind to `port`, or the next free port if it is taken."""
+    last: Optional[OSError] = None
+    for candidate in range(port, port + attempts):
+        try:
+            return _Server(("127.0.0.1", candidate), make_handler(app))
+        except OSError as e:
+            last = e
+    raise OSError(f"No free port between {port} and {port + attempts - 1}: {last}")
+
+
 def serve(port: int = 8000, seed_csv: Optional[Path] = None, open_browser: bool = True) -> None:
     app = App(seed_csv)
-    httpd = ThreadingHTTPServer(("127.0.0.1", port), make_handler(app))
-    url = f"http://127.0.0.1:{httpd.server_address[1]}/"
+    httpd = bind_server(app, port)
+    actual = httpd.server_address[1]
+    url = f"http://127.0.0.1:{actual}/"
+    if actual != port:
+        print(f"Port {port} is used by another program, so ListingAI is using port {actual} instead.")
     print(f"ListingAI is running at {url}\nPress Ctrl+C to stop.")
     if open_browser:
         webbrowser.open(url)

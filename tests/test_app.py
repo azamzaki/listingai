@@ -240,6 +240,15 @@ class WebApp(unittest.TestCase):
         self.assertIn("at least 9 digits", self.get("/add"))
         self.assertEqual(self.app.listings, [])
 
+    def test_busy_port_falls_back_to_next(self):
+        from listingai.server import bind_server
+        busy = self.httpd.server_address[1]
+        other = bind_server(self.app, busy)
+        try:
+            self.assertNotEqual(other.server_address[1], busy)
+        finally:
+            other.server_close()
+
     def test_foreign_host_blocked(self):
         req = urllib.request.Request(self.base + "/settings", headers={"Host": "evil.example"})
         with self.assertRaises(urllib.error.HTTPError) as cm:
