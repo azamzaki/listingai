@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 from typing import Iterable, Optional
 
 from .models import Listing
+from .regions import mentions
 from .settings import _write_private, data_dir
 
 
@@ -44,11 +45,7 @@ class Campaign:
 
 
 def _contains_place(text: str, place: str) -> bool:
-    place = place.strip()
-    if not place:
-        return False
-    words = r"\s+".join(re.escape(w) for w in place.split())
-    return re.search(rf"(?<![\w]){words}(?![\w])", text, re.IGNORECASE) is not None
+    return mentions(text, place)
 
 
 def parse_locations(text: str) -> list[str]:

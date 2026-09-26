@@ -84,6 +84,23 @@ class Extraction(unittest.TestCase):
         self.assertEqual(split_posts("a\n---\nb\n  -----  \n\n c \n---\n"), ["a", "b", "c"])
 
 
+class NorthernPlaces(unittest.TestCase):
+    def test_abbreviations_and_aliases(self):
+        from listingai.extract import find_location
+        for text, want in [("Rumah Sg Petani murah", "Sungai Petani"), ("teres Bkt. Mertajam", "Bukit Mertajam"),
+                           ("Alor Star, Kedah", "Alor Setar"), ("condo Georgetown heritage", "George Town"),
+                           ("apartment di Prai", "Perai"), ("Tmn Ria Jaya SP", "Taman Ria Jaya"),
+                           ("rumah di Kedah", "Kedah"), ("Ayer Itam", "Air Itam")]:
+            with self.subTest(text=text):
+                self.assertEqual(find_location(text), want)
+
+    def test_campaign_matches_short_forms(self):
+        c = new_campaign("Kedah south", ["Sungai Petani", "Kulim"])
+        l = Listing(id="x", post_url="", location="", caption="Rumah teres Sg.Petani RM380k")
+        apply_campaigns([l], [c])
+        self.assertTrue(l.matches_target_location)
+
+
 class Campaigns(unittest.TestCase):
     def listing(self, location, caption="", price=500_000):
         return Listing(id=location, post_url="", location=location, caption=caption, price=price, matches_target_location=False)
@@ -305,6 +322,15 @@ class WebApp(unittest.TestCase):
         self.assertIn("Rumah &lt;b&gt;Bangi&lt;/b&gt;", page)
         self.assertIn('value="https://facebook.com/groups/x"', page)
         self.assertIn("javascript:", self.get("/import"))
+
+    def test_remove_examples(self):
+        from listingai.__main__ import load_listings
+        from pathlib import Path
+        self.app.listings = load_listings(Path("sample_listings.csv"))
+        self.post("/add", caption="Rumah Kulim RM350k owner 012-1112223", posted="")
+        self.assertIn("Remove example listings", self.get("/settings"))
+        self.post("/settings/examples")
+        self.assertEqual([l.caption for l in self.app.listings], ["Rumah Kulim RM350k owner 012-1112223"])
 
     def test_busy_port_falls_back_to_next(self):
         from listingai.server import bind_server

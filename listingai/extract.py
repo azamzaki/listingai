@@ -13,18 +13,7 @@ from dataclasses import dataclass
 from typing import Iterable, Optional
 
 from .llm import Opener, OpenAIError, _request
-
-# Common Malaysian areas, used when no campaign place matches. Longer names first.
-KNOWN_PLACES = sorted([
-    "Bandar Baru Bangi", "Bangi", "Kajang", "Semenyih", "Cyberjaya", "Putrajaya", "Seri Kembangan", "Serdang",
-    "Puchong", "Shah Alam", "Klang", "Subang Jaya", "Petaling Jaya", "Damansara", "Kota Damansara", "Mont Kiara",
-    "Cheras", "Ampang", "Setapak", "Wangsa Maju", "Gombak", "Rawang", "Selayang", "Kepong", "Sungai Buloh",
-    "Bukit Jalil", "Sri Petaling", "Kuala Lumpur", "Seremban", "Nilai", "Sepang", "Dengkil", "Kota Kemuning",
-    "Bukit Jelutong", "Setia Alam", "Kapar", "Banting", "Bukit Beruntung", "Kuala Selangor", "Hulu Langat",
-    "Balakong", "Bandar Mahkota Cheras", "Johor Bahru", "Iskandar Puteri", "Skudai", "Kulai", "Pasir Gudang",
-    "Melaka", "Ipoh", "Penang", "George Town", "Bayan Lepas", "Butterworth", "Bukit Mertajam", "Alor Setar",
-    "Sungai Petani", "Kota Bharu", "Kuala Terengganu", "Kuantan", "Kota Kinabalu", "Kuching", "Miri",
-], key=len, reverse=True)
+from .regions import STATES, known_places, mentions
 
 _PHONE = re.compile(r"(?<!\d)(?:\+?6)?0(?:1\d[\s-]?\d{3,4}[\s-]?\d{4}|[3-9][\s-]?\d{3,4}[\s-]?\d{4})(?!\d)")
 _EMAIL = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
@@ -71,9 +60,10 @@ def find_price(text: str) -> Optional[int]:
 
 
 def find_location(text: str, places: Iterable[str] = ()) -> Optional[str]:
-    for place in sorted({p.strip() for p in places if p.strip()}, key=len, reverse=True) + KNOWN_PLACES:
-        words = r"\s+".join(re.escape(w) for w in place.split())
-        if re.search(rf"(?<!\w){words}(?!\w)", text or "", re.I):
+    """Campaign places first, then known towns, then state names. Returns the canonical name."""
+    campaign = sorted({" ".join(p.split()) for p in places if p.strip()}, key=len, reverse=True)
+    for place in campaign + known_places() + STATES:
+        if mentions(text, place):
             return place
     return None
 

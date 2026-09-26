@@ -22,15 +22,17 @@ This opens http://127.0.0.1:8000 in your browser. It runs only on your computer 
 - **Dashboard**: every listing with its agent-intent status, score, evidence and filters
   (status, campaign, location, search, sort). "Re-check all with AI" appears once an OpenAI key is saved.
 - **Add listing**: paste a post (plus photo text or owner comments). Phone, email, price (RM650k,
-  RM1.2 juta…), location (your campaign places first, then common Malaysian areas) and whether the
+  RM1.2 juta…), location (your campaign places first, then about 150 Malaysian towns, then state names) and whether the
   owner posted it are read from the text when left blank; with an OpenAI key the AI fills gaps, and a
   phone, email or location it gives must appear in the post. It is then checked straight away.
 - **Import posts**: a **+ ListingAI** browser button (drag it to the bookmarks bar) that sends the post
   text you select on Facebook, Marketplace, Mudah, Telegram Web or any site to the Add listing form, and a box
   to paste many posts at once, separated by `---` lines. Duplicates are skipped. ListingAI never logs in to or
   scans Facebook or other sites itself; you pick each post.
-- **Campaigns**: create a campaign per area, e.g. "Bangi & Kajang landed" with places
-  `Bangi, Bandar Baru Bangi, Kajang` and an optional price range. A listing joins a campaign when its
+- **Campaigns**: create a campaign per area, e.g. "Penang mainland landed" with places
+  `Bukit Mertajam, Butterworth, Seberang Jaya` and an optional price range. One-click presets fill in
+  Penang Island, Seberang Perai, Kedah, Perlis or north Perak. Short forms owners type ("Sg Petani",
+  "Bkt Mertajam", "Alor Star", "Prai", "Georgetown", "Tmn …") are matched automatically. A listing joins a campaign when its
   location or post text names one of the places (whole words) and its price is in range. When at least
   one campaign is active, only listings in an active campaign count as in a target location, so only they
   can trigger exclusive-opportunity alerts. Campaigns can be edited, paused and deleted.
@@ -78,6 +80,7 @@ It follows the system light/dark theme and works on phones.
 | `listingai/pipeline.py` | To Contact gating, manual override, Review Queue |
 | `listingai/dashboard.py` | Badges, status filters, HTML dashboard |
 | `listingai/campaigns.py` | Location campaigns and matching |
+| `listingai/regions.py` | Place names by region, presets, abbreviation-aware matching |
 | `listingai/extract.py` | Reads phone, email, price, location and owner from post text |
 | `listingai/llm.py` | Optional OpenAI second opinion |
 | `listingai/settings.py` | Local settings and listing storage |

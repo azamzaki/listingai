@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Optional
 from urllib.parse import parse_qs, quote, urlparse
 
+from .regions import PRESETS, REGIONS
 from .campaigns import Campaign, apply_campaigns, load_campaigns, new_campaign, parse_locations, save_campaigns
 from .config import DEFAULT_CONFIG
 from .dashboard import _TEMPLATE, render_dashboard_html
@@ -72,6 +73,11 @@ def _int(value: str) -> Optional[int]:
         return int(float(value))
     except ValueError:
         raise ValueError(f"'{value}' is not a number.") from None
+
+
+def _is_example(listing: Listing) -> bool:
+    """Listings seeded from sample_listings.csv (old ids L1…, new ids EX1…)."""
+    return re.fullmatch(r"(?:L|EX)\d+", listing.id) is not None
 
 
 def _valid_phone(phone: str) -> bool:
@@ -160,6 +166,11 @@ class App:
                   f'<button class="b danger" type="submit">Remove key</button></form>') if s.openai_api_key else ""
         test = (f'<form class="inline" method="post" action="/settings/test"><input type="hidden" name="csrf" value="{c}">'
                 f'<button class="b" type="submit">Test connection</button></form>') if s.effective_key else ""
+        n_examples = sum(1 for l in self.listings if _is_example(l))
+        examples = (f"""<section class="card"><h2>Example listings</h2>
+  <p>{n_examples} example listings were loaded when ListingAI first started. Remove them once you have your own.</p>
+  <form method="post" action="/settings/examples"><input type="hidden" name="csrf" value="{c}">
+  <button class="b danger" type="submit">Remove example listings</button></form></section>""" if n_examples else "")
         body = f"""
 <section class="card">
   <h2>OpenAI connection</h2>
@@ -178,7 +189,8 @@ class App:
     <div class="row" style="grid-column:1/-1"><button class="b primary" type="submit">Save settings</button></div>
   </form>
   <div class="row">{test}{remove}</div>
-</section>"""
+</section>
+{examples}"""
         return self.shell("Settings", "/settings", body)
 
     def campaigns_page(self, edit_id: str = "") -> str:
@@ -212,20 +224,25 @@ class App:
 </article>""")
         listing = "".join(cards) or '<p class="muted">No campaigns yet. Until you create one, every listing counts as in a target location.</p>'
         e = editing
+        presets = "".join(
+            f'<button type="button" class="b preset" data-name="{_esc(name)}" data-places="{_esc(", ".join(REGIONS[name]))}">+ {_esc(name)}</button>'
+            for name in PRESETS
+        )
         form = f"""
 <section class="card">
   <h2>{'Edit campaign' if e else 'New campaign'}</h2>
   <p>Pick the areas you work in. A listing joins the campaign when its location or post text mentions one of these places
   and its price is in range. Only listings in an active campaign can trigger exclusive-opportunity alerts.</p>
+  <div class="row" aria-label="Region presets"><span class="muted">Quick fill:</span>{presets}</div>
   <form method="post" action="/campaigns/save" class="grid2">
     <input type="hidden" name="csrf" value="{c}"><input type="hidden" name="id" value="{_esc(e.id) if e else ''}">
     <label class="field" for="c_name">Campaign name
-      <input id="c_name" name="name" required value="{_esc(e.name) if e else ''}" placeholder="Bangi landed homes"></label>
+      <input id="c_name" name="name" required value="{_esc(e.name) if e else ''}" placeholder="Penang mainland landed"></label>
     <label class="field" for="c_email"><span>Alert email <span class="hint">· optional</span></span>
       <input id="c_email" name="alert_email" type="email" value="{_esc(e.alert_email) if e else ''}" placeholder="you@example.com"></label>
     <label class="field" for="c_locs" style="grid-column:1/-1">Locations
-      <textarea id="c_locs" name="locations" required placeholder="Bangi, Bandar Baru Bangi, Kajang, Semenyih">{_esc(', '.join(e.locations)) if e else ''}</textarea>
-      <span class="hint">Separate places with commas or new lines. Include the spellings owners use, e.g. "BBB", "Seksyen 9".</span></label>
+      <textarea id="c_locs" name="locations" required placeholder="Bukit Mertajam, Butterworth, Seberang Jaya, Sungai Petani">{_esc(', '.join(e.locations)) if e else ''}</textarea>
+      <span class="hint">Separate places with commas or new lines. Short forms like "Sg Petani", "Bkt Mertajam" and "Alor Star" are matched automatically. Add housing areas owners mention, e.g. "Taman Ria Jaya".</span></label>
     <label class="field" for="c_min"><span>Minimum price (RM) <span class="hint">· optional</span></span>
       <input id="c_min" name="min_price" inputmode="numeric" value="{e.min_price if e and e.min_price is not None else ''}" placeholder="300000"></label>
     <label class="field" for="c_max"><span>Maximum price (RM) <span class="hint">· optional</span></span>
@@ -235,7 +252,17 @@ class App:
       {'<a class="b" href="/campaigns">Cancel</a>' if e else ''}</div>
   </form>
 </section>"""
-        return self.shell("Campaigns", "/campaigns", f'{form}<section class="camps">{listing}</section>')
+        script = """<script>
+document.querySelectorAll('.preset').forEach(function(b){b.addEventListener('click',function(){
+  var box=document.getElementById('c_locs'), name=document.getElementById('c_name');
+  var have=box.value.split(/[,\\n;]+/).map(function(x){return x.trim()}).filter(Boolean);
+  var lower=have.map(function(x){return x.toLowerCase()});
+  b.dataset.places.split(', ').forEach(function(p){ if(lower.indexOf(p.toLowerCase())<0){ have.push(p); lower.push(p.toLowerCase()); } });
+  box.value=have.join(', ');
+  if(!name.value.trim()) name.value=b.dataset.name;
+});});
+</script>"""
+        return self.shell("Campaigns", "/campaigns", f'{form}<section class="camps">{listing}</section>{script}')
 
     def add_page(self, prefill: Optional[dict[str, str]] = None) -> str:
         c = self.csrf
@@ -250,12 +277,12 @@ class App:
   <form method="post" action="/add" class="grid2">
     <input type="hidden" name="csrf" value="{c}">
     <label class="field" for="a_caption" style="grid-column:1/-1">Post text
-      <textarea id="a_caption" name="caption" required placeholder="Owner jual rumah teres Bangi RM650k. Nak lantik seorang ejen sahaja. WhatsApp 012-3456789">{_esc(pre.get("caption", ""))}</textarea></label>
+      <textarea id="a_caption" name="caption" required placeholder="Owner jual rumah teres Bukit Mertajam RM450k. Nak lantik seorang ejen sahaja. WhatsApp 012-3456789">{_esc(pre.get("caption", ""))}</textarea></label>
     <label class="field" for="a_ocr" style="grid-column:1/-1">Text in the photos <span class="hint">optional, typed exactly as shown</span>
       <textarea id="a_ocr" name="image_text" style="min-height:60px"></textarea></label>
     <label class="field" for="a_comment" style="grid-column:1/-1">Owner's comment <span class="hint">optional, only comments written by the owner</span>
       <textarea id="a_comment" name="owner_comment" style="min-height:60px"></textarea></label>
-    <label class="field" for="a_loc"><span>Location <span class="hint">· blank = detect</span></span><input id="a_loc" name="location" placeholder="Bangi"></label>
+    <label class="field" for="a_loc"><span>Location <span class="hint">· blank = detect</span></span><input id="a_loc" name="location" placeholder="Sungai Petani"></label>
     <label class="field" for="a_price"><span>Price (RM) <span class="hint">· blank = detect</span></span><input id="a_price" name="price" inputmode="numeric" placeholder="650000"></label>
     <label class="field" for="a_phone"><span>Public phone <span class="hint">· blank = detect</span></span><input id="a_phone" name="phone" inputmode="tel" placeholder="012-3456789"></label>
     <label class="field" for="a_email"><span>Public email <span class="hint">· blank = detect</span></span><input id="a_email" name="email" type="email"></label>
@@ -296,8 +323,8 @@ class App:
   <form method="post" action="/import" class="grid2">
     <input type="hidden" name="csrf" value="{c}">
     <label class="field" for="i_posts" style="grid-column:1/-1">Posts
-      <textarea id="i_posts" name="posts" required style="min-height:260px" placeholder="Rumah teres Bangi RM650k. Owner jual, nak lantik seorang ejen sahaja. 012-3456789&#10;---&#10;Condo Cyberjaya RM480,000, agents welcome. Call 013-2223344"></textarea></label>
-    <label class="field" for="i_loc"><span>Location if a post doesn't say <span class="hint">· optional</span></span><input id="i_loc" name="default_location" placeholder="Bangi"></label>
+      <textarea id="i_posts" name="posts" required style="min-height:260px" placeholder="Rumah teres Sg Petani RM380k. Owner jual, nak lantik seorang ejen sahaja. 012-3456789&#10;---&#10;Condo Bayan Lepas RM520,000, agents welcome. Call 013-2223344"></textarea></label>
+    <label class="field" for="i_loc"><span>Location if a post doesn't say <span class="hint">· optional</span></span><input id="i_loc" name="default_location" placeholder="Kulim"></label>
     <label class="field" for="i_date">Posted on<input id="i_date" name="posted" type="date" value="{datetime.now().strftime("%Y-%m-%d")}"></label>
     <div class="row" style="grid-column:1/-1"><button class="b primary" type="submit">Import posts</button>
       <span class="muted">Up to 100 posts at a time.{" Each post uses a little OpenAI credit." if self.settings.effective_key else ""}</span></div>
@@ -331,6 +358,12 @@ class App:
                 self.say(test_api_key(self.settings.effective_key, self.settings.openai_model))
             except OpenAIError as e:
                 self.say(str(e), True)
+            return "/settings"
+        if path == "/settings/examples":
+            before = len(self.listings)
+            self.listings = [l for l in self.listings if not _is_example(l)]
+            self.refresh()
+            self.say(f"Removed {before - len(self.listings)} example listings.")
             return "/settings"
         if path == "/settings/remove":
             self.settings.openai_api_key = ""
