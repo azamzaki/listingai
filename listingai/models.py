@@ -69,6 +69,7 @@ class ExclusiveAgentResult:
     already_appointed_agent_ren: Optional[str]
     exclusive_agent_detected_at: datetime
     review_reason: Optional[str] = None
+    classified_by: str = "rules"  # rules | openai | rules+openai | manual
 
     def to_dict(self) -> dict:
         data = asdict(self)
@@ -110,6 +111,7 @@ class Listing:
     exclusive_agent: Optional[ExclusiveAgentResult] = None
     pipeline_stage: Optional[str] = None
     contact_override: Optional[ContactOverride] = None
+    campaign_ids: list[str] = field(default_factory=list)
 
     @property
     def public_contact(self) -> Optional[str]:

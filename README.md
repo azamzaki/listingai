@@ -11,7 +11,37 @@ No third-party dependencies (Python 3.10+). Run tests with:
 python3 -m unittest
 ```
 
-## Run the dashboard
+## Run the app
+
+```sh
+python -m listingai serve
+```
+
+This opens http://127.0.0.1:8000 in your browser. It runs only on your computer and has four pages:
+
+- **Dashboard**: every listing with its agent-intent status, score, evidence and filters
+  (status, campaign, location, search, sort). "Re-check all with AI" appears once an OpenAI key is saved.
+- **Add listing**: paste a post (plus photo text or owner comments). It is checked straight away.
+- **Campaigns**: create a campaign per area, e.g. "Bangi & Kajang landed" with places
+  `Bangi, Bandar Baru Bangi, Kajang` and an optional price range. A listing joins a campaign when its
+  location or post text names one of the places (whole words) and its price is in range. When at least
+  one campaign is active, only listings in an active campaign count as in a target location, so only they
+  can trigger exclusive-opportunity alerts. Campaigns can be edited, paused and deleted.
+- **Settings**: save your OpenAI API key and model, test the connection, or remove the key.
+
+Your data (settings, campaigns, listings) is stored in `~/.listingai` (set `LISTINGAI_HOME` to change it).
+The API key is stored only there, or read from the `OPENAI_API_KEY` environment variable; it is never
+put into a page or the repository. On first run the app loads `sample_listings.csv` as example data.
+
+### How the OpenAI check works
+
+The phrase rules always run first. With a key, the post is also sent to OpenAI, which must quote its
+supporting phrase exactly from the post; answers that quote anything else are ignored. The AI can add
+a status the rules missed, but it cannot overturn a manual verification or resolve an `uncertain` post
+(it adds a note for the reviewer). If the rules and the AI disagree, the listing goes to review.
+If OpenAI can't be reached, the rule result is kept.
+
+## Static dashboard from a CSV
 
 ```sh
 python -m listingai                  # builds dashboard.html from sample_listings.csv and opens it
@@ -40,6 +70,10 @@ It follows the system light/dark theme and works on phones.
 | `listingai/alerts.py` | Alert eligibility and `[EXCLUSIVE OPPORTUNITY]` email builder |
 | `listingai/pipeline.py` | To Contact gating, manual override, Review Queue |
 | `listingai/dashboard.py` | Badges, status filters, HTML dashboard |
+| `listingai/campaigns.py` | Location campaigns and matching |
+| `listingai/llm.py` | Optional OpenAI second opinion |
+| `listingai/settings.py` | Local settings and listing storage |
+| `listingai/server.py` | Local web app (`python -m listingai serve`) |
 
 ## Classification
 

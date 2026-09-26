@@ -1,4 +1,9 @@
-"""Build the dashboard from a CSV of listings and open it in the browser.
+"""Command line entry point.
+
+    python -m listingai serve                 # the full app: dashboard, campaigns, OpenAI settings
+    python -m listingai serve --port 8080
+
+Or build a one-off static dashboard from a CSV:
 
     python -m listingai                       # uses sample_listings.csv
     python -m listingai my_listings.csv       # your own data
@@ -12,6 +17,7 @@ is_direct_owner, in_target_location, posted_days_ago, scam_risk_score, base_scor
 from __future__ import annotations
 
 import argparse
+import sys
 import csv
 import webbrowser
 from datetime import datetime, timedelta, timezone
@@ -61,7 +67,21 @@ def load_listings(path: Path) -> list[Listing]:
     return listings
 
 
+def serve_main(argv: list[str]) -> None:
+    from .server import serve
+
+    parser = argparse.ArgumentParser(prog="python -m listingai serve", description="Run the ListingAI app on this computer.")
+    parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument("--csv", default="sample_listings.csv", help="listings to start with on first run")
+    parser.add_argument("--no-open", action="store_true", help="do not open the browser")
+    args = parser.parse_args(argv)
+    serve(args.port, Path(args.csv), not args.no_open)
+
+
 def main(argv: list[str] | None = None) -> None:
+    argv = sys.argv[1:] if argv is None else argv
+    if argv[:1] == ["serve"]:
+        return serve_main(argv[1:])
     parser = argparse.ArgumentParser(prog="python -m listingai", description="Build the ListingAI dashboard.")
     parser.add_argument("csv", nargs="?", default="sample_listings.csv", help="listings CSV (default: sample_listings.csv)")
     parser.add_argument("-o", "--output", default="dashboard.html", help="output HTML file (default: dashboard.html)")

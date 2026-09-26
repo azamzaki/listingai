@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import html
 import json
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Iterable, Optional
@@ -86,14 +87,24 @@ def dashboard_link(listing: Listing, config: ExclusiveAgentConfig = DEFAULT_CONF
 def _reason_labels(codes: Iterable[str]) -> list[str]:
     out = []
     for code in codes:
-        for part in code.split(","):
+        parts = []
+        for note in code.split(";"):
+            note = note.strip()
+            parts.extend(note.split(",") if re.fullmatch(r"[a-z_,]+", note) else [note])
+        for part in parts:
+            if not part:
+                continue
             label = _REASON_LABELS.get(part, part.replace("_", " "))
             if label not in out:
                 out.append(label)
     return out
 
 
-def listing_view(listing: Listing, config: ExclusiveAgentConfig = DEFAULT_CONFIG, now: Optional[datetime] = None) -> dict:
+_BY = {"rules": "Phrase rules", "openai": "OpenAI", "rules+openai": "Phrase rules + OpenAI", "manual": "Manually verified"}
+
+
+def listing_view(listing: Listing, config: ExclusiveAgentConfig = DEFAULT_CONFIG, now: Optional[datetime] = None,
+                 campaign_names: Optional[dict[str, str]] = None) -> dict:
     """Everything the dashboard shows for one listing, as plain JSON data."""
     from .alerts import build_subject, exclusive_opportunity_decision
     from .pipeline import can_enter_to_contact, owner_instruction
@@ -141,6 +152,8 @@ def listing_view(listing: Listing, config: ExclusiveAgentConfig = DEFAULT_CONFIG
         "owner_instruction": owner_instruction(listing),
         "can_contact": allowed,
         "contact_block": _reason_labels([block]) if block else [],
+        "classified_by": _BY.get(ea.classified_by, ea.classified_by) if ea else None,
+        "campaigns": [(campaign_names or {}).get(c, c) for c in listing.campaign_ids if c in (campaign_names or {})],
         "override": f"{listing.contact_override.user}: {listing.contact_override.reason}" if listing.contact_override else None,
     }
 
@@ -151,9 +164,12 @@ def render_dashboard_html(
     now: Optional[datetime] = None,
     source_name: str = "",
     full_document: bool = True,
+    nav_html: str = "",
+    flash_html: str = "",
+    campaign_names: Optional[dict[str, str]] = None,
 ) -> str:
     now = now or datetime.now(timezone.utc)
-    views = [listing_view(l, config, now) for l in sort_for_dashboard(listings)]
+    views = [listing_view(l, config, now, campaign_names) for l in sort_for_dashboard(listings)]
     data = json.dumps(views, ensure_ascii=False).replace("</", "<\\/")
     chips = "".join(
         f'<button type="button" class="chip c-{BADGES[S(v)].key}" data-status="{v}" aria-pressed="false">'
@@ -168,6 +184,8 @@ def render_dashboard_html(
     page = (_TEMPLATE
             .replace("__CHIPS__", chips)
             .replace("__META__", meta)
+            .replace("__NAV__", nav_html)
+            .replace("__FLASH__", flash_html)
             .replace("__THRESHOLD__", str(round(config.confidence_threshold * 100)))
             .replace("__DATA__", data))
     if not full_document:
@@ -327,6 +345,15 @@ dt{color:var(--ink-3)} dd{margin:0;font-weight:500;overflow-wrap:anywhere}
 .copy{border:1px solid var(--line);background:var(--surface);border-radius:6px;padding:3px 9px;font-size:12px;cursor:pointer}
 .btn{display:inline-flex;align-items:center;gap:6px;padding:9px 14px;border-radius:10px;background:var(--accent);color:var(--surface);text-decoration:none;font-weight:600;font-size:14px}
 .foot{color:var(--ink-3);font-size:12.5px;max-width:72ch}
+.tag.camp{border-color:transparent;background:var(--accent-soft);color:var(--accent);font-weight:600}
+.tag.ai{border-style:dashed}
+.appnav{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px}
+.appnav a,.appnav button{display:inline-flex;align-items:center;gap:6px;padding:7px 12px;border-radius:9px;border:1px solid var(--line);background:var(--surface);color:var(--ink);text-decoration:none;font-size:13px;font-weight:600;cursor:pointer}
+.appnav a:hover,.appnav button:hover{border-color:var(--ink-3)}
+.appnav .primary{background:var(--accent);border-color:var(--accent);color:var(--surface)}
+.appnav form{display:contents}
+.flash{padding:10px 14px;border-radius:10px;font-size:14px;font-weight:500;background:var(--accent-soft);color:var(--accent)}
+.flash.err{background:var(--rejects-bg);color:var(--rejects)}
 
 @media (max-width:720px){
   .lead{grid-template-columns:52px minmax(0,1fr);gap:14px;padding:14px}
@@ -345,6 +372,7 @@ dt{color:var(--ink-3)} dd{margin:0;font-weight:500;overflow-wrap:anywhere}
       <span class="eyebrow">ListingAI · Exclusive-agent intent</span>
       <h1>Lead Desk</h1>
       <span class="meta">__META__</span>
+      __NAV__
     </div>
     <div class="kpis" aria-label="Summary">
       <div class="kpi"><b id="k-total">0</b><span>Listings</span></div>
@@ -353,6 +381,7 @@ dt{color:var(--ink-3)} dd{margin:0;font-weight:500;overflow-wrap:anywhere}
     </div>
   </header>
 
+  __FLASH__
   <nav class="chips" aria-label="Filter by status">
     <button type="button" class="chip all" data-status="" aria-pressed="true"><span class="dot"></span><span class="chip-label">All</span><span class="chip-count" data-count="">0</span></button>
     __CHIPS__
@@ -361,6 +390,7 @@ dt{color:var(--ink-3)} dd{margin:0;font-weight:500;overflow-wrap:anywhere}
   <div class="tools">
     <label class="search"><svg viewBox="0 0 24 24" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
       <input id="q" type="search" placeholder="Search caption, location, phone, agent…" aria-label="Search"></label>
+    <select id="camp" aria-label="Campaign" hidden><option value="">All campaigns</option></select>
     <select id="loc" aria-label="Location"><option value="">All locations</option></select>
     <select id="sort" aria-label="Sort">
       <option value="priority">Sort: priority</option>
@@ -384,7 +414,7 @@ dt{color:var(--ink-3)} dd{margin:0;font-weight:500;overflow-wrap:anywhere}
 <script>
 (function(){
   var DATA = JSON.parse(document.getElementById('lead-data').textContent);
-  var state = {statuses:new Set(), q:'', loc:'', sort:'priority', emailOnly:false};
+  var state = {statuses:new Set(), q:'', loc:'', camp:'', sort:'priority', emailOnly:false};
   var $ = function(s){return document.querySelector(s)};
   var esc = function(s){return String(s==null?'':s).replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]})};
   var rm = function(n){return n==null?'':'RM'+Number(n).toLocaleString('en-MY')};
@@ -408,6 +438,11 @@ dt{color:var(--ink-3)} dd{margin:0;font-weight:500;overflow-wrap:anywhere}
   Array.from(new Set(DATA.map(function(d){return d.location}).filter(Boolean))).sort().forEach(function(l){
     var o = document.createElement('option'); o.value = l; o.textContent = l; $('#loc').appendChild(o);
   });
+  var camps = Array.from(new Set([].concat.apply([], DATA.map(function(d){return d.campaigns||[]})))).sort();
+  if(camps.length){ $('#camp').hidden = false; camps.forEach(function(c){
+    var o = document.createElement('option'); o.value = c; o.textContent = c; $('#camp').appendChild(o); }); }
+  try{ var qc = new URLSearchParams(location.search).get('campaign');
+    if(qc && camps.indexOf(qc)>=0){ state.camp = qc; $('#camp').value = qc; } }catch(e){}
   $('#sort').value = state.sort; $('#emailOnly').checked = state.emailOnly;
 
   function highlight(text, phrase){
@@ -424,6 +459,7 @@ dt{color:var(--ink-3)} dd{margin:0;font-weight:500;overflow-wrap:anywhere}
     var rows = DATA.filter(function(d){
       if(state.statuses.size && !state.statuses.has(d.status)) return false;
       if(state.loc && d.location!==state.loc) return false;
+      if(state.camp && (d.campaigns||[]).indexOf(state.camp)<0) return false;
       if(state.emailOnly && !d.email_ready) return false;
       if(q){
         var hay = [d.caption,d.location,d.phone,d.email,d.evidence,d.agent_name,d.agent_ren,d.badge,d.id].join(' ').toLowerCase();
@@ -449,6 +485,8 @@ dt{color:var(--ink-3)} dd{margin:0;font-weight:500;overflow-wrap:anywhere}
       if(d.review && d.status!=='uncertain') tags += '<span class="badge c-review"><span class="dot"></span>Perlu Semakan</span>';
       if(d.email_ready) tags += '<span class="tag mail">Exclusive alert</span>';
       tags += '<span class="tag">'+(d.direct_owner?'Direct owner':'Owner unverified')+'</span>';
+      (d.campaigns||[]).forEach(function(c){ tags += '<span class="tag camp">'+esc(c)+'</span>'; });
+      if(d.classified_by && d.classified_by.indexOf('OpenAI')>=0) tags += '<span class="tag ai">AI checked</span>';
       var facts = [];
       if(d.evidence) facts.push('<span><b>'+pct(d.confidence)+'</b> confidence · '+esc(SRC[d.source]||d.source)+'</span>');
       if(d.agent_name||d.agent_ren) facts.push('<span>Agent <b>'+esc([d.agent_name,d.agent_ren].filter(Boolean).join(' · '))+'</b></span>');
@@ -492,6 +530,8 @@ dt{color:var(--ink-3)} dd{margin:0;font-weight:500;overflow-wrap:anywhere}
           '<dt>Probability seeking</dt><dd class="num">'+pct(d.probability)+'</dd>'+
           '<dt>Contact preference</dt><dd>'+esc(PREF[d.preference]||d.preference)+'</dd>'+
           (d.agent_name||d.agent_ren?'<dt>Appointed agent</dt><dd>'+esc(d.agent_name||'—')+'</dd><dt>REN</dt><dd class="num">'+esc(d.agent_ren||'—')+'</dd>':'')+
+          '<dt>Checked by</dt><dd>'+esc(d.classified_by||'—')+'</dd>'+
+          '<dt>Campaigns</dt><dd>'+esc((d.campaigns||[]).join(', ')||'None')+'</dd>'+
           '<dt>Direct owner</dt><dd>'+(d.direct_owner?'Yes':'No / unknown')+'</dd>'+
           '<dt>Detected</dt><dd class="num">'+esc(d.detected_at?d.detected_at.slice(0,16).replace('T',' '):'—')+'</dd>'+
         '</dl></div>'+
@@ -525,6 +565,7 @@ dt{color:var(--ink-3)} dd{margin:0;font-weight:500;overflow-wrap:anywhere}
   function save(){ try{ localStorage.setItem('leaddesk', JSON.stringify({sort:state.sort, emailOnly:state.emailOnly})) }catch(e){} }
   $('#q').addEventListener('input', function(e){ state.q = e.target.value; render(); });
   $('#loc').addEventListener('change', function(e){ state.loc = e.target.value; render(); });
+  $('#camp').addEventListener('change', function(e){ state.camp = e.target.value; render(); });
   $('#sort').addEventListener('change', function(e){ state.sort = e.target.value; save(); render(); });
   $('#emailOnly').addEventListener('change', function(e){ state.emailOnly = e.target.checked; save(); render(); });
   $('#list').addEventListener('click', function(e){

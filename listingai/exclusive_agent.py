@@ -240,7 +240,9 @@ def classify_exclusive_agent(
     # 1. A reviewer's decision supersedes every automated signal.
     for item in evidence:
         if item.source is EvidenceSource.MANUALLY_VERIFIED and item.verified_status is not None:
-            return result(item.verified_status, 1.0, item.text or None, EvidenceSource.MANUALLY_VERIFIED, False)
+            r = result(item.verified_status, 1.0, item.text or None, EvidenceSource.MANUALLY_VERIFIED, False)
+            r.classified_by = "manual"
+            return r
 
     # Comments by anyone other than the owner say nothing about owner intent.
     usable = [e for e in evidence if not (e.source is EvidenceSource.COMMENT and not e.author_is_owner)]

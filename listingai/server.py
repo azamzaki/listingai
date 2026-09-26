@@ -1,0 +1,454 @@
+"""Local web app: dashboard, OpenAI settings, location campaigns, add listing.
+
+    python -m listingai serve
+
+Runs only on this computer (127.0.0.1). Data is kept in ~/.listingai
+(or LISTINGAI_HOME).
+"""
+
+from __future__ import annotations
+
+import html
+import re
+import secrets
+import threading
+import webbrowser
+from datetime import datetime, timezone
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from typing import Optional
+from urllib.parse import parse_qs, quote, urlparse
+
+from .campaigns import Campaign, apply_campaigns, load_campaigns, new_campaign, parse_locations, save_campaigns
+from .config import DEFAULT_CONFIG
+from .dashboard import _TEMPLATE, render_dashboard_html
+from .exclusive_agent import classify_exclusive_agent
+from .llm import OpenAIError, classify_with_ai, test_api_key
+from .models import EvidenceSource, ExclusiveAgentStatus as S, Listing, TextEvidence
+from .settings import Settings, data_dir, load_settings, load_store, save_settings, save_store
+
+_esc = html.escape
+_STYLE = re.search(r"<link rel=\"preconnect\".*?</style>", _TEMPLATE, re.S).group(0)
+_FORM_CSS = """<style>
+.card{background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:20px 22px;display:flex;flex-direction:column;gap:14px}
+.card h2{margin:0;font:700 19px/1.25 var(--display)}
+.card p{margin:0;color:var(--ink-2);max-width:68ch}
+.grid2{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px}
+.field{display:flex;flex-direction:column;gap:6px;font-size:13px;font-weight:600;color:var(--ink-2)}
+.field input,.field textarea,.field select{font:15px var(--body);color:var(--ink);padding:10px 12px;border:1px solid var(--line);border-radius:10px;background:var(--paper);width:100%}
+.field textarea{min-height:110px;resize:vertical}
+.hint{font-weight:400;color:var(--ink-3);font-size:12.5px}
+.check{display:flex;align-items:center;gap:8px;font-size:14px;color:var(--ink-2)}
+.check input{width:16px;height:16px;accent-color:var(--accent)}
+.row{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.b{display:inline-flex;align-items:center;padding:9px 14px;border-radius:10px;border:1px solid var(--line);background:var(--surface);color:var(--ink);font:600 14px var(--body);cursor:pointer;text-decoration:none}
+.b:hover{border-color:var(--ink-3)}
+.b.primary{background:var(--accent);border-color:var(--accent);color:var(--surface)}
+.b.danger{color:var(--rejects);border-color:color-mix(in srgb,var(--rejects) 40%,var(--line))}
+.status{display:inline-flex;gap:8px;align-items:center;font-size:14px;font-weight:600}
+.status .dot{width:9px;height:9px;border-radius:50%;background:var(--ink-3)}
+.status.on .dot{background:var(--good)} .status.on{color:var(--good)}
+.camps{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:12px}
+.camp{background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:16px 18px;display:flex;flex-direction:column;gap:10px}
+.camp.off{opacity:.65}
+.camp h3{margin:0;font:700 17px/1.25 var(--display)}
+.places{display:flex;flex-wrap:wrap;gap:6px}
+.place{font-size:12.5px;padding:3px 9px;border-radius:999px;background:var(--accent-soft);color:var(--accent);font-weight:600}
+.stats{display:flex;gap:18px;font-size:13px;color:var(--ink-3)}
+.stats b{font:700 18px var(--display);color:var(--ink);display:block;font-variant-numeric:tabular-nums}
+.muted{color:var(--ink-3);font-size:13px}
+form.inline{display:inline}
+</style>"""
+
+
+def _int(value: str) -> Optional[int]:
+    value = (value or "").replace(",", "").replace("RM", "").replace("rm", "").strip()
+    if not value:
+        return None
+    try:
+        return int(float(value))
+    except ValueError:
+        raise ValueError(f"'{value}' is not a number.") from None
+
+
+def _valid_phone(phone: str) -> bool:
+    return len(re.sub(r"\D", "", phone or "")) >= 9
+
+
+def _valid_email(email: str) -> bool:
+    return re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email or "") is not None
+
+
+class App:
+    def __init__(self, seed_csv: Optional[Path] = None):
+        from .__main__ import load_listings
+
+        self.lock = threading.Lock()
+        self.csrf = secrets.token_urlsafe(24)
+        self.flash: Optional[tuple[str, bool]] = None
+        self.settings: Settings = load_settings()
+        self.campaigns: list[Campaign] = load_campaigns()
+        stored = load_store()
+        if stored is None:
+            stored = load_listings(seed_csv) if seed_csv and seed_csv.exists() else []
+        self.listings: list[Listing] = stored
+        self.refresh()
+
+    # --- state ------------------------------------------------------------
+    def refresh(self) -> None:
+        apply_campaigns(self.listings, self.campaigns)
+        save_store(self.listings)
+
+    def classify(self, listing: Listing, use_ai: bool) -> None:
+        if not listing.public_contact:
+            listing.exclusive_agent = None
+            return
+        now = datetime.now(timezone.utc)
+        key = self.settings.effective_key
+        if use_ai and key:
+            listing.exclusive_agent = classify_with_ai(listing.all_evidence(), key, self.settings.openai_model, DEFAULT_CONFIG, now)
+        else:
+            listing.exclusive_agent = classify_exclusive_agent(listing.all_evidence(), DEFAULT_CONFIG, now)
+
+    def say(self, text: str, error: bool = False) -> None:
+        self.flash = (text, error)
+
+    def take_flash(self) -> str:
+        if not self.flash:
+            return ""
+        text, err = self.flash
+        self.flash = None
+        return f'<div class="flash{" err" if err else ""}" role="status">{_esc(text)}</div>'
+
+    # --- pages ------------------------------------------------------------
+    def nav(self, current: str) -> str:
+        links = [("/", "Dashboard"), ("/add", "Add listing"), ("/campaigns", "Campaigns"), ("/settings", "Settings")]
+        out = "".join(
+            f'<a href="{href}"{" class=primary" if href == current else ""}>{label}</a>' for href, label in links
+        )
+        if current == "/" and self.settings.effective_key and self.listings:
+            out += (f'<form method="post" action="/reanalyse"><input type="hidden" name="csrf" value="{self.csrf}">'
+                    f'<button type="submit">Re-check all with AI</button></form>')
+        ai = "AI on" if self.settings.effective_key else "AI off (phrase rules only)"
+        return f'<nav class="appnav" aria-label="Main">{out}<span class="muted" style="align-self:center">{ai}</span></nav>'
+
+    def shell(self, title: str, current: str, body: str) -> str:
+        return (f'<!doctype html><html lang="en"><head><meta charset="utf-8">'
+                f'<meta name="viewport" content="width=device-width,initial-scale=1">'
+                f'</head><body>{_STYLE.replace("<title>ListingAI Lead Desk</title>", "")}{_FORM_CSS}'
+                f'<title>{_esc(title)} · ListingAI</title>'
+                f'<div class="wrap"><header class="head"><div class="brand"><span class="eyebrow">ListingAI</span>'
+                f'<h1>{_esc(title)}</h1>{self.nav(current)}</div></header>{self.take_flash()}{body}</div></body></html>')
+
+    def dashboard(self) -> str:
+        names = {c.id: c.name for c in self.campaigns}
+        return render_dashboard_html(self.listings, DEFAULT_CONFIG, source_name="your ListingAI data",
+                                     nav_html=self.nav("/"), flash_html=self.take_flash(), campaign_names=names)
+
+    def settings_page(self) -> str:
+        s = self.settings
+        from_env = not s.openai_api_key and bool(s.effective_key)
+        status = (f'<span class="status on"><span class="dot"></span>Key saved ({_esc(s.key_hint)})'
+                  f'{" from OPENAI_API_KEY" if from_env else ""}</span>' if s.effective_key
+                  else '<span class="status"><span class="dot"></span>No key saved</span>')
+        c = self.csrf
+        remove = (f'<form class="inline" method="post" action="/settings/remove"><input type="hidden" name="csrf" value="{c}">'
+                  f'<button class="b danger" type="submit">Remove key</button></form>') if s.openai_api_key else ""
+        test = (f'<form class="inline" method="post" action="/settings/test"><input type="hidden" name="csrf" value="{c}">'
+                f'<button class="b" type="submit">Test connection</button></form>') if s.effective_key else ""
+        body = f"""
+<section class="card">
+  <h2>OpenAI connection</h2>
+  <p>With a key, each post is also read by an OpenAI model to catch wording the phrase rules miss. The AI must quote the
+  post word for word, and if it disagrees with the rules the listing goes to the review queue. The key is stored only on
+  this computer, in <code>{_esc(str(data_dir() / 'settings.json'))}</code> (or your LISTINGAI_HOME folder).</p>
+  <div class="row">{status}</div>
+  <form method="post" action="/settings" class="grid2" autocomplete="off">
+    <input type="hidden" name="csrf" value="{c}">
+    <label class="field" for="api_key">OpenAI API key
+      <input id="api_key" name="api_key" type="password" placeholder="{'Leave blank to keep the saved key' if s.openai_api_key else 'sk-…'}" spellcheck="false">
+      <span class="hint">Create one at platform.openai.com → API keys.</span></label>
+    <label class="field" for="model">Model
+      <input id="model" name="model" type="text" value="{_esc(s.openai_model)}" spellcheck="false">
+      <span class="hint">Any chat model your OpenAI account can use.</span></label>
+    <div class="row" style="grid-column:1/-1"><button class="b primary" type="submit">Save settings</button></div>
+  </form>
+  <div class="row">{test}{remove}</div>
+</section>"""
+        return self.shell("Settings", "/settings", body)
+
+    def campaigns_page(self, edit_id: str = "") -> str:
+        c = self.csrf
+        editing = next((x for x in self.campaigns if x.id == edit_id), None)
+        cards = []
+        for camp in self.campaigns:
+            matched = [l for l in self.listings if camp.id in l.campaign_ids]
+            seeking = sum(1 for l in matched if l.exclusive_agent and l.exclusive_agent.exclusive_agent_status is S.SEEKING_EXCLUSIVE_AGENT)
+            price = "Any price"
+            if camp.min_price is not None or camp.max_price is not None:
+                lo = f"RM{camp.min_price:,}" if camp.min_price is not None else "any"
+                hi = f"RM{camp.max_price:,}" if camp.max_price is not None else "any"
+                price = f"{lo} – {hi}"
+            places = "".join(f'<span class="place">{_esc(p)}</span>' for p in camp.locations)
+            cards.append(f"""
+<article class="camp{'' if camp.active else ' off'}">
+  <div class="row" style="justify-content:space-between"><h3>{_esc(camp.name)}</h3>
+    <span class="status{' on' if camp.active else ''}"><span class="dot"></span>{'Active' if camp.active else 'Paused'}</span></div>
+  <div class="places">{places}</div>
+  <div class="muted">{_esc(price)}{' · alerts to ' + _esc(camp.alert_email) if camp.alert_email else ''}</div>
+  <div class="stats"><span><b>{len(matched)}</b>listings</span><span><b>{seeking}</b>seeking an agent</span></div>
+  <div class="row">
+    <a class="b" href="/?campaign={_esc(quote(camp.name))}">View listings</a>
+    <a class="b" href="/campaigns?edit={_esc(camp.id)}">Edit</a>
+    <form class="inline" method="post" action="/campaigns/toggle"><input type="hidden" name="csrf" value="{c}"><input type="hidden" name="id" value="{_esc(camp.id)}">
+      <button class="b" type="submit">{'Pause' if camp.active else 'Resume'}</button></form>
+    <form class="inline" method="post" action="/campaigns/delete" onsubmit="return confirm('Delete campaign {_esc(camp.name)}?')"><input type="hidden" name="csrf" value="{c}"><input type="hidden" name="id" value="{_esc(camp.id)}">
+      <button class="b danger" type="submit">Delete</button></form>
+  </div>
+</article>""")
+        listing = "".join(cards) or '<p class="muted">No campaigns yet. Until you create one, every listing counts as in a target location.</p>'
+        e = editing
+        form = f"""
+<section class="card">
+  <h2>{'Edit campaign' if e else 'New campaign'}</h2>
+  <p>Pick the areas you work in. A listing joins the campaign when its location or post text mentions one of these places
+  and its price is in range. Only listings in an active campaign can trigger exclusive-opportunity alerts.</p>
+  <form method="post" action="/campaigns/save" class="grid2">
+    <input type="hidden" name="csrf" value="{c}"><input type="hidden" name="id" value="{_esc(e.id) if e else ''}">
+    <label class="field" for="c_name">Campaign name
+      <input id="c_name" name="name" required value="{_esc(e.name) if e else ''}" placeholder="Bangi landed homes"></label>
+    <label class="field" for="c_email"><span>Alert email <span class="hint">· optional</span></span>
+      <input id="c_email" name="alert_email" type="email" value="{_esc(e.alert_email) if e else ''}" placeholder="you@example.com"></label>
+    <label class="field" for="c_locs" style="grid-column:1/-1">Locations
+      <textarea id="c_locs" name="locations" required placeholder="Bangi, Bandar Baru Bangi, Kajang, Semenyih">{_esc(', '.join(e.locations)) if e else ''}</textarea>
+      <span class="hint">Separate places with commas or new lines. Include the spellings owners use, e.g. "BBB", "Seksyen 9".</span></label>
+    <label class="field" for="c_min"><span>Minimum price (RM) <span class="hint">· optional</span></span>
+      <input id="c_min" name="min_price" inputmode="numeric" value="{e.min_price if e and e.min_price is not None else ''}" placeholder="300000"></label>
+    <label class="field" for="c_max"><span>Maximum price (RM) <span class="hint">· optional</span></span>
+      <input id="c_max" name="max_price" inputmode="numeric" value="{e.max_price if e and e.max_price is not None else ''}" placeholder="900000"></label>
+    <label class="check" for="c_active"><input id="c_active" name="active" type="checkbox" {'checked' if (e is None or e.active) else ''}> Active</label>
+    <div class="row" style="grid-column:1/-1"><button class="b primary" type="submit">{'Save changes' if e else 'Create campaign'}</button>
+      {'<a class="b" href="/campaigns">Cancel</a>' if e else ''}</div>
+  </form>
+</section>"""
+        return self.shell("Campaigns", "/campaigns", f'{form}<section class="camps">{listing}</section>')
+
+    def add_page(self) -> str:
+        c = self.csrf
+        today = datetime.now().strftime("%Y-%m-%d")
+        ai = "OpenAI and the phrase rules" if self.settings.effective_key else "the phrase rules (add an OpenAI key in Settings for AI checking)"
+        body = f"""
+<section class="card">
+  <h2>Paste a post</h2>
+  <p>The listing is checked by {ai} and added to the dashboard straight away.</p>
+  <form method="post" action="/add" class="grid2">
+    <input type="hidden" name="csrf" value="{c}">
+    <label class="field" for="a_caption" style="grid-column:1/-1">Post text
+      <textarea id="a_caption" name="caption" required placeholder="Owner jual rumah teres Bangi. Nak lantik seorang ejen sahaja. WhatsApp 012-3456789"></textarea></label>
+    <label class="field" for="a_ocr" style="grid-column:1/-1">Text in the photos <span class="hint">optional, typed exactly as shown</span>
+      <textarea id="a_ocr" name="image_text" style="min-height:60px"></textarea></label>
+    <label class="field" for="a_comment" style="grid-column:1/-1">Owner's comment <span class="hint">optional, only comments written by the owner</span>
+      <textarea id="a_comment" name="owner_comment" style="min-height:60px"></textarea></label>
+    <label class="field" for="a_loc">Location<input id="a_loc" name="location" required placeholder="Bangi"></label>
+    <label class="field" for="a_price">Price (RM)<input id="a_price" name="price" inputmode="numeric" placeholder="650000"></label>
+    <label class="field" for="a_phone">Public phone<input id="a_phone" name="phone" inputmode="tel" placeholder="012-3456789"></label>
+    <label class="field" for="a_email">Public email<input id="a_email" name="email" type="email"></label>
+    <label class="field" for="a_url">Link to post<input id="a_url" name="url" type="url" placeholder="https://facebook.com/…"></label>
+    <label class="field" for="a_date">Posted on<input id="a_date" name="posted" type="date" value="{today}"></label>
+    <label class="field" for="a_score"><span>Base score (0–100) <span class="hint">· your rating before agent intent</span></span>
+      <input id="a_score" name="base_score" inputmode="numeric" value="70"></label>
+    <label class="field" for="a_scam">Scam risk (0–100)<input id="a_scam" name="scam_risk" inputmode="numeric" value="0"></label>
+    <label class="check" for="a_owner"><input id="a_owner" name="direct_owner" type="checkbox" checked> Posted by the owner</label>
+    <div class="row" style="grid-column:1/-1"><button class="b primary" type="submit">Check and add</button></div>
+  </form>
+</section>"""
+        return self.shell("Add listing", "/add", body)
+
+    # --- actions ----------------------------------------------------------
+    def post(self, path: str, form: dict[str, str]) -> str:
+        """Handle a form post; returns the path to redirect to."""
+        if path == "/settings":
+            key = form.get("api_key", "").strip()
+            model = form.get("model", "").strip() or self.settings.openai_model
+            if key and not key.startswith("sk-"):
+                self.say("That doesn't look like an OpenAI key. Keys start with sk-.", True)
+                return "/settings"
+            if key:
+                self.settings.openai_api_key = key
+            self.settings.openai_model = model
+            save_settings(self.settings)
+            if key:
+                try:
+                    self.say("Key saved. " + test_api_key(self.settings.effective_key, model))
+                except OpenAIError as e:
+                    self.say(f"Key saved, but the test failed: {e}", True)
+            else:
+                self.say("Settings saved.")
+            return "/settings"
+        if path == "/settings/test":
+            try:
+                self.say(test_api_key(self.settings.effective_key, self.settings.openai_model))
+            except OpenAIError as e:
+                self.say(str(e), True)
+            return "/settings"
+        if path == "/settings/remove":
+            self.settings.openai_api_key = ""
+            save_settings(self.settings)
+            self.say("API key removed from this computer.")
+            return "/settings"
+        if path == "/campaigns/save":
+            try:
+                camp = new_campaign(form.get("name", ""), parse_locations(form.get("locations", "")),
+                                    _int(form.get("min_price", "")), _int(form.get("max_price", "")),
+                                    form.get("alert_email", ""), "active" in form)
+            except ValueError as e:
+                self.say(str(e), True)
+                return "/campaigns"
+            existing = next((x for x in self.campaigns if x.id == form.get("id")), None)
+            if existing:
+                camp.id, camp.created_at = existing.id, existing.created_at
+                self.campaigns[self.campaigns.index(existing)] = camp
+                self.say(f"Campaign “{camp.name}” updated.")
+            else:
+                self.campaigns.append(camp)
+                self.say(f"Campaign “{camp.name}” created.")
+            save_campaigns(self.campaigns)
+            self.refresh()
+            return "/campaigns"
+        if path in ("/campaigns/toggle", "/campaigns/delete"):
+            camp = next((x for x in self.campaigns if x.id == form.get("id")), None)
+            if camp:
+                if path.endswith("toggle"):
+                    camp.active = not camp.active
+                    self.say(f"Campaign “{camp.name}” {'resumed' if camp.active else 'paused'}.")
+                else:
+                    self.campaigns.remove(camp)
+                    self.say(f"Campaign “{camp.name}” deleted.")
+                save_campaigns(self.campaigns)
+                self.refresh()
+            return "/campaigns"
+        if path == "/add":
+            return self._add(form)
+        if path == "/reanalyse":
+            errors = 0
+            for l in self.listings:
+                self.classify(l, use_ai=True)
+                if l.exclusive_agent and "AI unavailable" in (l.exclusive_agent.review_reason or ""):
+                    errors += 1
+            self.refresh()
+            if errors:
+                self.say(f"Re-checked {len(self.listings)} listings. The AI could not be reached for {errors}; those kept the phrase-rule result.", True)
+            else:
+                self.say(f"Re-checked {len(self.listings)} listings with AI.")
+            return "/"
+        return "/"
+
+    def _add(self, form: dict[str, str]) -> str:
+        caption = form.get("caption", "").strip()
+        phone, email = form.get("phone", "").strip(), form.get("email", "").strip()
+        try:
+            if not caption:
+                raise ValueError("Paste the post text.")
+            if phone and not _valid_phone(phone):
+                raise ValueError("The phone number needs at least 9 digits.")
+            if email and not _valid_email(email):
+                raise ValueError("The email address doesn't look right.")
+            price = _int(form.get("price", ""))
+            base = max(0, min(100, _int(form.get("base_score", "")) or 0))
+            scam = max(0, min(100, _int(form.get("scam_risk", "")) or 0))
+            posted = datetime.strptime(form["posted"], "%Y-%m-%d").replace(tzinfo=timezone.utc) if form.get("posted") else None
+        except ValueError as e:
+            self.say(str(e), True)
+            return "/add"
+        evidence = [TextEvidence(EvidenceSource.CAPTION, caption)]
+        if form.get("image_text", "").strip():
+            evidence.append(TextEvidence(EvidenceSource.IMAGE_OCR, form["image_text"].strip()))
+        if form.get("owner_comment", "").strip():
+            evidence.append(TextEvidence(EvidenceSource.COMMENT, form["owner_comment"].strip()))
+        listing = Listing(
+            id=f"M{datetime.now().strftime('%y%m%d%H%M%S')}{secrets.token_hex(1)}",
+            post_url=form.get("url", "").strip(), location=form.get("location", "").strip(), price=price,
+            caption=caption, is_direct_owner="direct_owner" in form, public_phone=phone or None,
+            public_email=email or None, has_eligible_contact=bool(phone or email), matches_target_location=True,
+            posted_at=posted, scam_risk_score=scam, base_opportunity_score=base, evidence=evidence,
+        )
+        self.classify(listing, use_ai=True)
+        self.listings.append(listing)
+        self.refresh()
+        if listing.exclusive_agent is None:
+            self.say("Added. It has no public phone or email, so agent intent was not checked.")
+        else:
+            ea = listing.exclusive_agent
+            quote = f": “{ea.exclusive_agent_evidence}”" if ea.exclusive_agent_evidence else ""
+            self.say(f"Added {listing.location} listing as {ea.exclusive_agent_status.value.replace('_', ' ')}{quote}"
+                     + (" (checked with AI)" if "openai" in ea.classified_by else ""))
+        return "/"
+
+
+def make_handler(app: App):
+    class Handler(BaseHTTPRequestHandler):
+        server_version = "ListingAI"
+
+        def log_message(self, fmt, *args):  # keep the terminal quiet
+            pass
+
+        def _local_host(self) -> bool:
+            host = (self.headers.get("Host") or "").split(":")[0]
+            return host in ("127.0.0.1", "localhost")
+
+        def _send(self, code: int, body: str = "", location: str = "") -> None:
+            data = body.encode("utf-8")
+            self.send_response(code)
+            if location:
+                self.send_header("Location", location)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Frame-Options", "DENY")
+            self.end_headers()
+            self.wfile.write(data)
+
+        def do_GET(self):
+            if not self._local_host():
+                return self._send(403, "Forbidden")
+            url = urlparse(self.path)
+            q = parse_qs(url.query)
+            with app.lock:
+                if url.path == "/":
+                    return self._send(200, app.dashboard())
+                if url.path == "/settings":
+                    return self._send(200, app.settings_page())
+                if url.path == "/campaigns":
+                    return self._send(200, app.campaigns_page(q.get("edit", [""])[0]))
+                if url.path == "/add":
+                    return self._send(200, app.add_page())
+            self._send(404, "Not found")
+
+        def do_POST(self):
+            if not self._local_host():
+                return self._send(403, "Forbidden")
+            length = min(int(self.headers.get("Content-Length") or 0), 1_000_000)
+            raw = parse_qs(self.rfile.read(length).decode("utf-8"), keep_blank_values=True)
+            form = {k: v[0] for k, v in raw.items()}
+            if not secrets.compare_digest(form.get("csrf", ""), app.csrf):
+                return self._send(403, "This form has expired. Go back and reload the page.")
+            with app.lock:
+                target = app.post(urlparse(self.path).path, form)
+            self._send(303, location=target)
+
+    return Handler
+
+
+def serve(port: int = 8000, seed_csv: Optional[Path] = None, open_browser: bool = True) -> None:
+    app = App(seed_csv)
+    httpd = ThreadingHTTPServer(("127.0.0.1", port), make_handler(app))
+    url = f"http://127.0.0.1:{httpd.server_address[1]}/"
+    print(f"ListingAI is running at {url}\nPress Ctrl+C to stop.")
+    if open_browser:
+        webbrowser.open(url)
+    try:
+        httpd.serve_forever()
+    except KeyboardInterrupt:
+        print("\nStopped.")
+    finally:
+        httpd.server_close()
