@@ -112,6 +112,7 @@ class Listing:
     pipeline_stage: Optional[str] = None
     contact_override: Optional[ContactOverride] = None
     campaign_ids: list[str] = field(default_factory=list)
+    source: str = ""  # e.g. "Mudah email alert"; empty for posts added by hand
 
     @property
     def public_contact(self) -> Optional[str]:

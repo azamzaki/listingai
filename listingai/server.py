@@ -27,7 +27,8 @@ from .config import DEFAULT_CONFIG
 from .dashboard import _TEMPLATE, render_dashboard_html
 from .exclusive_agent import classify_exclusive_agent
 from .examples import is_example
-from .extract import extract_listing, split_posts
+from .extract import extract_listing, extract_with_rules, split_posts
+from .mailalerts import SITES, MailError, fetch_alert_items
 from .llm import OpenAIError, classify_with_ai, test_api_key
 from .models import EvidenceSource, ExclusiveAgentStatus as S, Listing, TextEvidence
 from .settings import Settings, data_dir, load_settings, load_store, save_settings, save_store
@@ -155,7 +156,8 @@ class App:
     def dashboard(self) -> str:
         names = {c.id: c.name for c in self.campaigns}
         return render_dashboard_html(self.listings, DEFAULT_CONFIG, source_name="your ListingAI data",
-                                     nav_html=self.nav("/"), flash_html=self.take_flash(), campaign_names=names)
+                                     nav_html=self.nav("/"), flash_html=self.take_flash(), campaign_names=names,
+                                     csrf=self.csrf)
 
     def settings_page(self) -> str:
         s = self.settings
@@ -186,8 +188,102 @@ class App:
     <div class="row" style="grid-column:1/-1"><button class="b primary" type="submit">Save settings</button></div>
   </form>
   <div class="row">{test}{remove}</div>
-</section>"""
+</section>
+{self._email_section()}"""
         return self.shell("Settings", "/settings", body)
+
+    def _email_section(self) -> str:
+        s, c = self.settings, self.csrf
+        connected = bool(s.email_address and s.email_app_password)
+        status = (f'<span class="status on"><span class="dot"></span>Reading {_esc(s.email_address)}</span>' if connected
+                  else '<span class="status"><span class="dot"></span>Not connected</span>')
+        last = ""
+        if s.email_last_check:
+            last = f'<span class="muted">Last checked {_esc(s.email_last_check[:16].replace("T", " "))}</span>'
+        sites = "".join(
+            f'<label class="check" for="es_{k}"><input id="es_{k}" type="checkbox" name="site_{k}" '
+            f'{"checked" if k in s.email_sites else ""}> {_esc(site.name)}</label>'
+            for k, site in SITES.items()
+        )
+        check = (f'<form class="inline" method="post" action="/settings/email/check"><input type="hidden" name="csrf" value="{c}">'
+                 f'<button class="b" type="submit">Check email now</button></form>') if connected else ""
+        disconnect = (f'<form class="inline" method="post" action="/settings/email/remove"><input type="hidden" name="csrf" value="{c}">'
+                      f'<button class="b danger" type="submit">Disconnect email</button></form>') if connected else ""
+        return f"""
+<section class="card">
+  <h2>Property site email alerts</h2>
+  <p>Save a search on Mudah, PropertyGuru or iProperty for your areas and turn on email alerts there. ListingAI then reads
+  those alert emails from your mailbox and adds each new listing to the dashboard. It only reads emails from the sites
+  ticked below, never changes or deletes email, and never visits the sites itself.</p>
+  <p class="muted">Gmail: turn on 2-Step Verification, then create an app password at myaccount.google.com/apppasswords
+  and paste the 16 letters below. Your normal Gmail password will not work.</p>
+  <div class="row">{status}{last}</div>
+  <form method="post" action="/settings/email" class="grid2" autocomplete="off">
+    <input type="hidden" name="csrf" value="{c}">
+    <label class="field" for="e_addr">Email address
+      <input id="e_addr" name="email_address" type="email" value="{_esc(s.email_address)}" placeholder="you@gmail.com"></label>
+    <label class="field" for="e_pw">App password
+      <input id="e_pw" name="email_app_password" type="password" spellcheck="false"
+        placeholder="{'Leave blank to keep the saved password' if s.email_app_password else 'abcd efgh ijkl mnop'}"></label>
+    <label class="field" for="e_every">Check every
+      <select id="e_every" name="email_check_minutes">{''.join(f'<option value="{m}"{" selected" if m == s.email_check_minutes else ""}>{label}</option>' for m, label in [(15, "15 minutes"), (30, "30 minutes"), (60, "1 hour"), (0, "Only when I click Check")])}</select></label>
+    <label class="field" for="e_host"><span>Mail server <span class="hint">· imap.gmail.com for Gmail</span></span>
+      <input id="e_host" name="email_imap_host" value="{_esc(s.email_imap_host)}"></label>
+    <div class="row" style="grid-column:1/-1">{sites}</div>
+    <div class="row" style="grid-column:1/-1"><button class="b primary" type="submit">Save email settings</button></div>
+  </form>
+  <div class="row">{check}{disconnect}</div>
+</section>"""
+
+    # --- email alerts -------------------------------------------------------
+    def fetch_email(self):
+        """Network part of an email check; runs without holding the lock."""
+        s = self.settings
+        return fetch_alert_items(s.email_address, s.email_app_password, s.email_imap_host, s.email_sites, s.email_seen)
+
+    def add_alert_items(self, result) -> tuple[int, int]:
+        """Add fetched alert listings. Returns (added, skipped as duplicates). Call with the lock held."""
+        known_urls = {l.post_url for l in self.listings if l.post_url}
+        known_titles = {(" ".join(l.caption.lower().split())[:120], l.price) for l in self.listings}
+        places = [p for c in self.campaigns for p in c.locations]
+        added = dupes = 0
+        for item in result.items:
+            title_key = (" ".join(item.text.lower().split())[:120], item.price)
+            if item.url in known_urls or title_key in known_titles:
+                dupes += 1
+                continue
+            known_urls.add(item.url)
+            known_titles.add(title_key)
+            found = extract_with_rules(item.text, places)
+            self.listings.append(Listing(
+                id=f"A{datetime.now().strftime('%y%m%d%H%M%S')}{secrets.token_hex(2)}",
+                post_url=item.url, location=item.location or found.location or "", price=item.price,
+                caption=item.text, is_direct_owner=bool(found.is_direct_owner),
+                public_phone=found.phone, public_email=found.email,
+                has_eligible_contact=bool(found.phone or found.email), matches_target_location=True,
+                posted_at=datetime.now(timezone.utc), base_opportunity_score=70,
+                source=f"{SITES[item.site].name} email alert",
+            ))
+            if found.phone or found.email:
+                self.classify(self.listings[-1], use_ai=True)
+            added += 1
+        self.settings.email_seen = (self.settings.email_seen + result.new_seen)[-5000:]
+        self.settings.email_last_check = datetime.now().isoformat(timespec="minutes")
+        save_settings(self.settings)
+        self.refresh()
+        return added, dupes
+
+    def check_email_now(self) -> str:
+        try:
+            result = self.fetch_email()
+        except MailError as e:
+            return str(e)
+        with self.lock:
+            added, dupes = self.add_alert_items(result)
+        if not result.emails_read:
+            return "No new alert emails."
+        return (f"Read {result.emails_read} alert email{'s' if result.emails_read != 1 else ''}: "
+                f"{added} new listing{'s' if added != 1 else ''} added" + (f", {dupes} already in ListingAI." if dupes else "."))
 
     def campaigns_page(self, edit_id: str = "") -> str:
         c = self.csrf
@@ -355,6 +451,32 @@ document.querySelectorAll('.preset').forEach(function(b){b.addEventListener('cli
             except OpenAIError as e:
                 self.say(str(e), True)
             return "/settings"
+        if path == "/settings/email":
+            s = self.settings
+            s.email_address = form.get("email_address", "").strip()
+            if form.get("email_app_password", "").strip():
+                s.email_app_password = form["email_app_password"].strip()
+            s.email_imap_host = form.get("email_imap_host", "").strip() or "imap.gmail.com"
+            s.email_sites = [k for k in SITES if f"site_{k}" in form]
+            try:
+                s.email_check_minutes = int(form.get("email_check_minutes", "30"))
+            except ValueError:
+                s.email_check_minutes = 30
+            save_settings(s)
+            self.say("Email settings saved. Click Check email now to test them.")
+            return "/settings"
+        if path == "/settings/email/remove":
+            self.settings.email_app_password = ""
+            save_settings(self.settings)
+            self.say("Email disconnected. The app password was removed from this computer.")
+            return "/settings"
+        if path == "/listings/delete":
+            before = len(self.listings)
+            self.listings = [l for l in self.listings if l.id != form.get("id")]
+            if len(self.listings) < before:
+                self.refresh()
+                self.say("Listing removed.")
+            return "/"
         if path == "/settings/remove":
             self.settings.openai_api_key = ""
             save_settings(self.settings)
@@ -554,8 +676,14 @@ def make_handler(app: App):
             form = {k: v[0] for k, v in raw.items()}
             if not secrets.compare_digest(form.get("csrf", ""), app.csrf):
                 return self._send(403, "This form has expired. Go back and reload the page.")
+            path = urlparse(self.path).path
+            if path == "/settings/email/check":
+                message = app.check_email_now()
+                with app.lock:
+                    app.say(message, error=message.startswith(("Add your", "Choose", "Could not", "The mailbox")))
+                return self._send(303, location="/settings")
             with app.lock:
-                target = app.post(urlparse(self.path).path, form)
+                target = app.post(path, form)
             self._send(303, location=target)
 
     return Handler
@@ -596,6 +724,23 @@ def bind_server(app: "App", port: int, attempts: int = 20) -> ThreadingHTTPServe
     raise OSError(f"No free port between {port} and {port + attempts - 1}: {last}")
 
 
+def _email_loop(app: App, tick: float = 60.0) -> None:
+    """Check alert emails on the chosen schedule while the app runs."""
+    import time
+
+    last = 0.0
+    while True:
+        time.sleep(tick)
+        s = app.settings
+        if not (s.email_address and s.email_app_password and s.email_check_minutes):
+            continue
+        if time.time() - last < s.email_check_minutes * 60:
+            continue
+        last = time.time()
+        message = app.check_email_now()
+        print(f"[{datetime.now():%H:%M}] Email alerts: {message}")
+
+
 def serve(port: int = 8321, import_csv: Optional[Path] = None, open_browser: bool = True) -> None:
     app = App(import_csv)
     if app.removed_examples:
@@ -607,6 +752,7 @@ def serve(port: int = 8321, import_csv: Optional[Path] = None, open_browser: boo
     if actual != port:
         print(f"Port {port} is used by another program, so ListingAI is using port {actual} instead.")
     print(f"ListingAI is running at {url}\nPress Ctrl+C to stop.")
+    threading.Thread(target=_email_loop, args=(app,), daemon=True).start()
     if open_browser:
         webbrowser.open(url)
     try:

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -37,6 +37,14 @@ def data_dir() -> Path:
 class Settings:
     openai_api_key: str = ""
     openai_model: str = DEFAULT_MODEL
+    # Saved-search email alerts (read over IMAP, e.g. Gmail with an app password).
+    email_address: str = ""
+    email_app_password: str = ""
+    email_imap_host: str = "imap.gmail.com"
+    email_sites: list = field(default_factory=lambda: ["mudah", "propertyguru", "iproperty"])
+    email_check_minutes: int = 30
+    email_seen: list = field(default_factory=list)  # Message-IDs already imported
+    email_last_check: str = ""
 
     @property
     def effective_key(self) -> str:
@@ -66,9 +74,17 @@ def load_settings() -> Settings:
     if not path.exists():
         return Settings()
     raw = json.loads(path.read_text(encoding="utf-8") or "{}")
+    defaults = Settings()
     return Settings(
         openai_api_key=raw.get("openai_api_key", ""),
         openai_model=raw.get("openai_model") or DEFAULT_MODEL,
+        email_address=raw.get("email_address", ""),
+        email_app_password=raw.get("email_app_password", ""),
+        email_imap_host=raw.get("email_imap_host") or defaults.email_imap_host,
+        email_sites=list(raw.get("email_sites", defaults.email_sites)),
+        email_check_minutes=int(raw.get("email_check_minutes", defaults.email_check_minutes)),
+        email_seen=list(raw.get("email_seen", [])),
+        email_last_check=raw.get("email_last_check", ""),
     )
 
 
@@ -125,6 +141,7 @@ def listing_to_dict(l: Listing) -> dict:
             if l.contact_override else None
         ),
         "campaign_ids": l.campaign_ids,
+        "source": l.source,
     }
 
 
@@ -148,6 +165,7 @@ def listing_from_dict(d: dict) -> Listing:
         pipeline_stage=d.get("pipeline_stage"),
         contact_override=ContactOverride(co["user"], co["reason"], _dt(co["at"])) if co else None,
         campaign_ids=list(d.get("campaign_ids", [])),
+        source=d.get("source", ""),
     )
 
 

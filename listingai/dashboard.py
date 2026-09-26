@@ -152,6 +152,7 @@ def listing_view(listing: Listing, config: ExclusiveAgentConfig = DEFAULT_CONFIG
         "owner_instruction": owner_instruction(listing),
         "can_contact": allowed,
         "contact_block": _reason_labels([block]) if block else [],
+        "source": listing.source,
         "classified_by": _BY.get(ea.classified_by, ea.classified_by) if ea else None,
         "campaigns": [(campaign_names or {}).get(c, c) for c in listing.campaign_ids if c in (campaign_names or {})],
         "override": f"{listing.contact_override.user}: {listing.contact_override.reason}" if listing.contact_override else None,
@@ -167,6 +168,7 @@ def render_dashboard_html(
     nav_html: str = "",
     flash_html: str = "",
     campaign_names: Optional[dict[str, str]] = None,
+    csrf: str = "",
 ) -> str:
     now = now or datetime.now(timezone.utc)
     views = [listing_view(l, config, now, campaign_names) for l in sort_for_dashboard(listings)]
@@ -185,6 +187,7 @@ def render_dashboard_html(
             .replace("__CHIPS__", chips)
             .replace("__META__", meta)
             .replace("__NAV__", nav_html)
+            .replace("__CSRF__", html.escape(csrf))
             .replace("__FLASH__", flash_html)
             .replace("__THRESHOLD__", str(round(config.confidence_threshold * 100)))
             .replace("__DATA__", data))
@@ -410,10 +413,11 @@ dt{color:var(--ink-3)} dd{margin:0;font-weight:500;overflow-wrap:anywhere}
 <div class="scrim" id="scrim" hidden></div>
 <aside class="drawer" id="drawer" hidden role="dialog" aria-modal="true" aria-labelledby="d-title"></aside>
 
-<script type="application/json" id="lead-data">__DATA__</script>
+<script type="application/json" id="lead-data" data-csrf="__CSRF__">__DATA__</script>
 <script>
 (function(){
   var DATA = JSON.parse(document.getElementById('lead-data').textContent);
+  var CSRF = document.getElementById('lead-data').getAttribute('data-csrf') || '';
   var state = {statuses:new Set(), q:'', loc:'', camp:'', sort:'priority', emailOnly:false};
   var $ = function(s){return document.querySelector(s)};
   var esc = function(s){return String(s==null?'':s).replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]})};
@@ -491,12 +495,13 @@ dt{color:var(--ink-3)} dd{margin:0;font-weight:500;overflow-wrap:anywhere}
       if(d.email_ready) tags += '<span class="tag mail">Exclusive alert</span>';
       tags += '<span class="tag">'+(d.direct_owner?'Direct owner':'Owner unverified')+'</span>';
       (d.campaigns||[]).forEach(function(c){ tags += '<span class="tag camp">'+esc(c)+'</span>'; });
+      if(d.source) tags += '<span class="tag">'+esc(d.source)+'</span>';
       if(d.classified_by && d.classified_by.indexOf('OpenAI')>=0) tags += '<span class="tag ai">AI checked</span>';
       var facts = [];
       if(d.evidence) facts.push('<span><b>'+pct(d.confidence)+'</b> confidence · '+esc(SRC[d.source]||d.source)+'</span>');
       if(d.agent_name||d.agent_ren) facts.push('<span>Agent <b>'+esc([d.agent_name,d.agent_ren].filter(Boolean).join(' · '))+'</b></span>');
       facts.push('<span>Posted '+ago(d.age_days)+'</span>');
-      if(!d.classified) facts.push('<span>No public contact, not analysed</span>');
+      if(!d.classified) facts.push('<span>'+(d.source?'Open the listing and capture the full post with + ListingAI':'No public contact, not analysed')+'</span>');
       return '<article class="lead'+(d.status==='seeking_exclusive_agent'?' is-seeking':'')+'" tabindex="0" role="button" data-id="'+esc(d.id)+'" aria-label="Open '+esc(d.location)+' listing">'+
         '<div class="score '+scoreClass(d.score)+'" style="--v:'+d.score+'"><b>'+d.score+'</b><small>/100</small></div>'+
         '<div class="lead-main"><div class="tags">'+tags+'</div>'+
@@ -550,6 +555,9 @@ dt{color:var(--ink-3)} dd{margin:0;font-weight:500;overflow-wrap:anywhere}
         '<div class="sect"><h4>Public contact</h4><dl><dt>Phone</dt><dd>'+copyBtn(d.phone)+'</dd><dt>Email</dt><dd>'+copyBtn(d.email)+'</dd></dl></div>'+
         '<div class="sect"><h4>Full post</h4><p class="full">'+highlight(d.caption||'',d.evidence)+'</p></div>'+
         (d.url?'<div><a class="btn" href="'+esc(d.url)+'" target="_blank" rel="noopener">Open original post ↗</a></div>':'')+
+        (CSRF?'<form method="post" action="/listings/delete" onsubmit="return confirm(\'Remove this listing from ListingAI?\')">'+
+          '<input type="hidden" name="csrf" value="'+esc(CSRF)+'"><input type="hidden" name="id" value="'+esc(d.id)+'">'+
+          '<button type="submit" class="copy" style="padding:7px 12px;color:var(--rejects)">Remove from ListingAI</button></form>':'')+
       '</div>';
     $('#drawer').hidden = false; $('#scrim').hidden = false;
     $('#close').focus();
