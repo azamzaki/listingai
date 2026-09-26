@@ -1,0 +1,89 @@
+# ListingAI
+
+Property-listing lead intelligence. This package currently implements
+**exclusive-agent intent detection**: whether an owner who posted a listing with a
+public phone number or email wants to appoint an exclusive real estate agent.
+It also covers the scoring, alert, pipeline and dashboard rules that depend on it.
+
+No third-party dependencies (Python 3.10+). Run tests with:
+
+```sh
+python3 -m unittest
+```
+
+## Modules
+
+| Module | Purpose |
+| --- | --- |
+| `listingai/config.py` | `ExclusiveAgentConfig`: thresholds, score bonuses/penalties, alert limits |
+| `listingai/models.py` | `Listing`, `TextEvidence`, `ExclusiveAgentResult` and enums |
+| `listingai/exclusive_agent.py` | English + Bahasa Malaysia classifier |
+| `listingai/scoring.py` | Opportunity score adjustment and hard gates |
+| `listingai/alerts.py` | Alert eligibility and `[EXCLUSIVE OPPORTUNITY]` email builder |
+| `listingai/pipeline.py` | To Contact gating, manual override, Review Queue |
+| `listingai/dashboard.py` | Badges, status filters, HTML dashboard |
+
+## Classification
+
+`exclusive_agent_status` is one of `seeking_exclusive_agent`,
+`open_to_agent_appointment`, `already_has_exclusive_agent`, `rejects_agents`,
+`no_evidence` or `uncertain`. The result also carries
+`exclusive_agent_probability`, `exclusive_agent_confidence`,
+`exclusive_agent_evidence` (an exact substring of the source text),
+`exclusive_agent_evidence_source` (`caption`, `image_ocr`, `video_transcript`,
+`profile`, `comment`, `manually_verified`), `exclusive_agent_review_required`,
+`agent_contact_preference`, `already_appointed_agent_name`,
+`already_appointed_agent_ren` and `exclusive_agent_detected_at`.
+
+Rules:
+
+- Only listings with a public phone or email are classified.
+- Direct-owner status is never an input. "Owner sell" yields `no_evidence`.
+- Confidence is the pattern weight × source reliability × OCR/transcript confidence.
+  Questions, hedges ("maybe", "mungkin"), sarcasm markers ("haha", "🙄") and
+  negations lower it. Anything below `confidence_threshold` becomes `uncertain`
+  and goes to the Review Queue.
+- Truncated OCR (`"Looking for exclusive ag..."`) is never completed. It becomes
+  `uncertain` with the fragment quoted as-is.
+- Comments only count when written by the owner (`author_is_owner=True`).
+- A `manually_verified` evidence item with `verified_status` overrides all
+  automated signals.
+- Conflicts: a rejection together with a positive signal stays `rejects_agents`
+  but is flagged for review. An appointed agent together with a request for one
+  becomes `uncertain`. "Exclusive listing, co-broke welcome" becomes `already_has_exclusive_agent`.
+
+## Scoring and alerts
+
+| Status | Score effect | Immediate alerts |
+| --- | --- | --- |
+| seeking_exclusive_agent | `+seeking_exclusive_bonus` (15) | yes, with `[EXCLUSIVE OPPORTUNITY]` |
+| open_to_agent_appointment | `+open_to_appointment_bonus` (5) | yes |
+| already_has_exclusive_agent | `already_has_agent_penalty` (−20) | yes |
+| rejects_agents | none | excluded unless `alert_on_rejects_agents` |
+| no_evidence | none | yes |
+| uncertain | none | held for review |
+
+Bonuses are never applied to a listing that fails a hard gate: no eligible contact,
+privacy block, scam risk ≥ `max_scam_risk_score`, outside a target location,
+confirmed duplicate, or older than `max_listing_age_days`.
+
+An exclusive-opportunity email is sent only when all of these hold:
+`has_eligible_contact`, status `seeking_exclusive_agent`, confidence ≥ threshold,
+target location, not a confirmed duplicate, within max age, and scam risk below the limit.
+
+Example subject: `[EXCLUSIVE OPPORTUNITY][92/100] Direct Owner – Bangi RM650,000`.
+
+The email body shows the status, confidence, supporting phrase, evidence source,
+public phone/email, the original post link and the dashboard link.
+
+## Pipeline
+
+`rejects_agents` (and `uncertain` / review-required) listings cannot enter
+To Contact unless a user records an override with `override_contact_block(listing, user, reason)`.
+The dashboard shows the owner's instruction in red, for example
+*Pemilik tidak mahu dihubungi oleh ejen: "Ejen jangan hubungi"*.
+
+## Dashboard badges
+
+Mencari Ejen Eksklusif (top priority) · Terbuka Melantik Ejen · Perlu Semakan ·
+Tiada Bukti · Sudah Ada Ejen Eksklusif · Tidak Mahu Ejen. There is a filter for every status.
