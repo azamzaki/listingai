@@ -21,7 +21,14 @@ This opens http://127.0.0.1:8000 in your browser. It runs only on your computer 
 
 - **Dashboard**: every listing with its agent-intent status, score, evidence and filters
   (status, campaign, location, search, sort). "Re-check all with AI" appears once an OpenAI key is saved.
-- **Add listing**: paste a post (plus photo text or owner comments). It is checked straight away.
+- **Add listing**: paste a post (plus photo text or owner comments). Phone, email, price (RM650k,
+  RM1.2 juta…), location (your campaign places first, then common Malaysian areas) and whether the
+  owner posted it are read from the text when left blank; with an OpenAI key the AI fills gaps, and a
+  phone, email or location it gives must appear in the post. It is then checked straight away.
+- **Import posts**: a **+ ListingAI** browser button (drag it to the bookmarks bar) that sends the post
+  text you select on Facebook, Marketplace, Mudah, Telegram Web or any site to the Add listing form, and a box
+  to paste many posts at once, separated by `---` lines. Duplicates are skipped. ListingAI never logs in to or
+  scans Facebook or other sites itself; you pick each post.
 - **Campaigns**: create a campaign per area, e.g. "Bangi & Kajang landed" with places
   `Bangi, Bandar Baru Bangi, Kajang` and an optional price range. A listing joins a campaign when its
   location or post text names one of the places (whole words) and its price is in range. When at least
@@ -71,6 +78,7 @@ It follows the system light/dark theme and works on phones.
 | `listingai/pipeline.py` | To Contact gating, manual override, Review Queue |
 | `listingai/dashboard.py` | Badges, status filters, HTML dashboard |
 | `listingai/campaigns.py` | Location campaigns and matching |
+| `listingai/extract.py` | Reads phone, email, price, location and owner from post text |
 | `listingai/llm.py` | Optional OpenAI second opinion |
 | `listingai/settings.py` | Local settings and listing storage |
 | `listingai/server.py` | Local web app (`python -m listingai serve`) |

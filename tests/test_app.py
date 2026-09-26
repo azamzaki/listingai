@@ -46,6 +46,44 @@ def ev(text, source=Src.CAPTION, **kw):
     return [TextEvidence(source, text, **kw)]
 
 
+class Extraction(unittest.TestCase):
+    def test_rules(self):
+        from listingai.extract import extract_with_rules
+        e = extract_with_rules("Owner jual rumah teres Bandar Baru Bangi RM650k nego. WhatsApp 012-345 6789 / owner@mail.com")
+        self.assertEqual((e.phone, e.email, e.price, e.location, e.is_direct_owner),
+                         ("012-345 6789", "owner@mail.com", 650_000, "Bandar Baru Bangi", True))
+
+    def test_prices(self):
+        from listingai.extract import find_price
+        for text, want in [("RM650,000", 650_000), ("RM 1.2 juta", 1_200_000), ("harga 480k sahaja", 480_000),
+                           ("Deposit RM2,000, harga RM520,000", 520_000), ("sewa RM1,800 sebulan", 1_800), ("tiada harga", None)]:
+            with self.subTest(text=text):
+                self.assertEqual(find_price(text), want)
+
+    def test_agent_poster_is_not_owner(self):
+        from listingai.extract import extract_with_rules
+        self.assertFalse(extract_with_rules("Direct owner unit, contact Siti REN 12345").is_direct_owner)
+        self.assertIsNone(extract_with_rules("Rumah Kajang RM400k").is_direct_owner)
+
+    def test_campaign_places_take_priority(self):
+        from listingai.extract import find_location
+        self.assertEqual(find_location("Rumah di BBB seksyen 9, dekat Kajang", ["BBB"]), "BBB")
+
+    def test_ai_fills_gaps_but_not_invented_values(self):
+        from listingai.extract import extract_listing
+        text = "Rumah cantik di Taman Sri Minang, owner jual sendiri. Hubungi sembilan lapan: 019 876 5432"
+        e = extract_listing(text, api_key="sk-t", model="m", opener=fake_openai(
+            {"phone": "019 876 5432", "email": "made@up.com", "price_rm": 500000, "location": "Taman Sri Minang", "posted_by_owner": True}))
+        self.assertEqual(e.location, "Taman Sri Minang")
+        self.assertIsNone(e.email)  # not in the post
+        self.assertEqual(e.price, 500_000)
+        self.assertEqual(e.extracted_by, "rules+openai")
+
+    def test_split_posts(self):
+        from listingai.extract import split_posts
+        self.assertEqual(split_posts("a\n---\nb\n  -----  \n\n c \n---\n"), ["a", "b", "c"])
+
+
 class Campaigns(unittest.TestCase):
     def listing(self, location, caption="", price=500_000):
         return Listing(id=location, post_url="", location=location, caption=caption, price=price, matches_target_location=False)
@@ -239,6 +277,34 @@ class WebApp(unittest.TestCase):
         self.post("/add", caption="x", location="Bangi", phone="12", posted="")
         self.assertIn("at least 9 digits", self.get("/add"))
         self.assertEqual(self.app.listings, [])
+
+    def test_add_reads_details_from_post(self):
+        self.post("/add", caption="Owner jual rumah Kajang RM480k. Perlukan ejen untuk uruskan jualan. 012-7776655",
+                  posted=datetime.now().strftime("%Y-%m-%d"), owner="auto")
+        l = self.app.listings[0]
+        self.assertEqual((l.location, l.price, l.public_phone, l.is_direct_owner), ("Kajang", 480_000, "012-7776655", True))
+        self.assertEqual(l.exclusive_agent.exclusive_agent_status, S.SEEKING_EXCLUSIVE_AGENT)
+        self.post("/add", caption="Owner jual rumah Kajang RM480k. Perlukan ejen untuk uruskan jualan. 012-7776655")
+        self.assertEqual(len(self.app.listings), 1)
+        self.assertIn("already in ListingAI", self.get("/add"))
+
+    def test_import_many(self):
+        posts = ("Rumah Bangi RM650k, owner. Nak lantik seorang ejen sahaja. 012-3456789\n---\n"
+                 "Condo Cyberjaya RM480,000 agents welcome 013-2223344\n---\n"
+                 "Rumah Bangi RM650k, owner. Nak lantik seorang ejen sahaja. 012-3456789\n---\n"
+                 "Tanah lot murah, PM saya")
+        self.post("/import", posts=posts, posted=datetime.now().strftime("%Y-%m-%d"))
+        self.assertEqual(len(self.app.listings), 3)
+        page = self.get("/")
+        self.assertIn("Imported 3 of 4 posts.", page)
+        self.assertIn("1 already in ListingAI", page)
+        self.assertIn("1 had no public phone or email", page)
+
+    def test_bookmarklet_prefill(self):
+        page = self.get("/add?caption=Rumah%20%3Cb%3EBangi%3C/b%3E&url=https://facebook.com/groups/x")
+        self.assertIn("Rumah &lt;b&gt;Bangi&lt;/b&gt;", page)
+        self.assertIn('value="https://facebook.com/groups/x"', page)
+        self.assertIn("javascript:", self.get("/import"))
 
     def test_busy_port_falls_back_to_next(self):
         from listingai.server import bind_server

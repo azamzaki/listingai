@@ -25,6 +25,7 @@ from .campaigns import Campaign, apply_campaigns, load_campaigns, new_campaign, 
 from .config import DEFAULT_CONFIG
 from .dashboard import _TEMPLATE, render_dashboard_html
 from .exclusive_agent import classify_exclusive_agent
+from .extract import extract_listing, split_posts
 from .llm import OpenAIError, classify_with_ai, test_api_key
 from .models import EvidenceSource, ExclusiveAgentStatus as S, Listing, TextEvidence
 from .settings import Settings, data_dir, load_settings, load_store, save_settings, save_store
@@ -87,6 +88,7 @@ class App:
 
         self.lock = threading.Lock()
         self.csrf = secrets.token_urlsafe(24)
+        self.base_url = "http://127.0.0.1:8000/"
         self.flash: Optional[tuple[str, bool]] = None
         self.settings: Settings = load_settings()
         self.campaigns: list[Campaign] = load_campaigns()
@@ -124,7 +126,7 @@ class App:
 
     # --- pages ------------------------------------------------------------
     def nav(self, current: str) -> str:
-        links = [("/", "Dashboard"), ("/add", "Add listing"), ("/campaigns", "Campaigns"), ("/settings", "Settings")]
+        links = [("/", "Dashboard"), ("/add", "Add listing"), ("/import", "Import posts"), ("/campaigns", "Campaigns"), ("/settings", "Settings")]
         out = "".join(
             f'<a href="{href}"{" class=primary" if href == current else ""}>{label}</a>' for href, label in links
         )
@@ -235,36 +237,73 @@ class App:
 </section>"""
         return self.shell("Campaigns", "/campaigns", f'{form}<section class="camps">{listing}</section>')
 
-    def add_page(self) -> str:
+    def add_page(self, prefill: Optional[dict[str, str]] = None) -> str:
         c = self.csrf
+        pre = prefill or {}
         today = datetime.now().strftime("%Y-%m-%d")
         ai = "OpenAI and the phrase rules" if self.settings.effective_key else "the phrase rules (add an OpenAI key in Settings for AI checking)"
         body = f"""
 <section class="card">
   <h2>Paste a post</h2>
-  <p>The listing is checked by {ai} and added to the dashboard straight away.</p>
+  <p>Leave the details blank and they are read from the post: phone, email, price, location and whether the owner
+  posted it. The listing is then checked by {ai} and added to the dashboard.</p>
   <form method="post" action="/add" class="grid2">
     <input type="hidden" name="csrf" value="{c}">
     <label class="field" for="a_caption" style="grid-column:1/-1">Post text
-      <textarea id="a_caption" name="caption" required placeholder="Owner jual rumah teres Bangi. Nak lantik seorang ejen sahaja. WhatsApp 012-3456789"></textarea></label>
+      <textarea id="a_caption" name="caption" required placeholder="Owner jual rumah teres Bangi RM650k. Nak lantik seorang ejen sahaja. WhatsApp 012-3456789">{_esc(pre.get("caption", ""))}</textarea></label>
     <label class="field" for="a_ocr" style="grid-column:1/-1">Text in the photos <span class="hint">optional, typed exactly as shown</span>
       <textarea id="a_ocr" name="image_text" style="min-height:60px"></textarea></label>
     <label class="field" for="a_comment" style="grid-column:1/-1">Owner's comment <span class="hint">optional, only comments written by the owner</span>
       <textarea id="a_comment" name="owner_comment" style="min-height:60px"></textarea></label>
-    <label class="field" for="a_loc">Location<input id="a_loc" name="location" required placeholder="Bangi"></label>
-    <label class="field" for="a_price">Price (RM)<input id="a_price" name="price" inputmode="numeric" placeholder="650000"></label>
-    <label class="field" for="a_phone">Public phone<input id="a_phone" name="phone" inputmode="tel" placeholder="012-3456789"></label>
-    <label class="field" for="a_email">Public email<input id="a_email" name="email" type="email"></label>
-    <label class="field" for="a_url">Link to post<input id="a_url" name="url" type="url" placeholder="https://facebook.com/…"></label>
+    <label class="field" for="a_loc"><span>Location <span class="hint">· blank = detect</span></span><input id="a_loc" name="location" placeholder="Bangi"></label>
+    <label class="field" for="a_price"><span>Price (RM) <span class="hint">· blank = detect</span></span><input id="a_price" name="price" inputmode="numeric" placeholder="650000"></label>
+    <label class="field" for="a_phone"><span>Public phone <span class="hint">· blank = detect</span></span><input id="a_phone" name="phone" inputmode="tel" placeholder="012-3456789"></label>
+    <label class="field" for="a_email"><span>Public email <span class="hint">· blank = detect</span></span><input id="a_email" name="email" type="email"></label>
+    <label class="field" for="a_url">Link to post<input id="a_url" name="url" type="url" value="{_esc(pre.get("url", ""))}" placeholder="https://facebook.com/…"></label>
     <label class="field" for="a_date">Posted on<input id="a_date" name="posted" type="date" value="{today}"></label>
+    <label class="field" for="a_owner_sel">Posted by the owner?
+      <select id="a_owner_sel" name="owner"><option value="auto">Detect from the post</option><option value="yes">Yes</option><option value="no">No</option></select></label>
     <label class="field" for="a_score"><span>Base score (0–100) <span class="hint">· your rating before agent intent</span></span>
       <input id="a_score" name="base_score" inputmode="numeric" value="70"></label>
     <label class="field" for="a_scam">Scam risk (0–100)<input id="a_scam" name="scam_risk" inputmode="numeric" value="0"></label>
-    <label class="check" for="a_owner"><input id="a_owner" name="direct_owner" type="checkbox" checked> Posted by the owner</label>
     <div class="row" style="grid-column:1/-1"><button class="b primary" type="submit">Check and add</button></div>
   </form>
 </section>"""
         return self.shell("Add listing", "/add", body)
+
+    def import_page(self) -> str:
+        c = self.csrf
+        base = self.base_url.rstrip("/")
+        bookmarklet = (
+            "javascript:(function(){var t=String(getSelection()).trim();"
+            "if(!t){alert('Select the text of a listing post first, then click the ListingAI button.');return;}"
+            f"window.open('{base}/add?caption='+encodeURIComponent(t.slice(0,6000))+'&url='+encodeURIComponent(location.href),'_blank');}})();"
+        )
+        body = f"""
+<section class="card">
+  <h2>Capture posts while you browse</h2>
+  <p>Drag this button to your browser's bookmarks bar (press Ctrl+Shift+B if the bar is hidden):</p>
+  <div class="row"><a class="b primary" href="{_esc(bookmarklet)}" onclick="event.preventDefault();alert('Drag this button to your bookmarks bar, don\'t click it here.')">+ ListingAI</a></div>
+  <p>Then, on Facebook groups, Marketplace, Mudah, Telegram Web or any other site: select the text of a listing post
+  with your mouse and click <b>+ ListingAI</b> in the bookmarks bar. ListingAI opens with the post filled in; click
+  <b>Check and add</b>. Keep ListingAI running while you browse.</p>
+  <p class="muted">You choose each post yourself. ListingAI never logs in to or scans Facebook or other sites for you.</p>
+</section>
+<section class="card">
+  <h2>Import many posts at once</h2>
+  <p>Paste posts from WhatsApp, Telegram, Facebook or anywhere else. Put a line with <code>---</code> between posts.
+  Details are read from each post, and posts already in ListingAI are skipped.</p>
+  <form method="post" action="/import" class="grid2">
+    <input type="hidden" name="csrf" value="{c}">
+    <label class="field" for="i_posts" style="grid-column:1/-1">Posts
+      <textarea id="i_posts" name="posts" required style="min-height:260px" placeholder="Rumah teres Bangi RM650k. Owner jual, nak lantik seorang ejen sahaja. 012-3456789&#10;---&#10;Condo Cyberjaya RM480,000, agents welcome. Call 013-2223344"></textarea></label>
+    <label class="field" for="i_loc"><span>Location if a post doesn't say <span class="hint">· optional</span></span><input id="i_loc" name="default_location" placeholder="Bangi"></label>
+    <label class="field" for="i_date">Posted on<input id="i_date" name="posted" type="date" value="{datetime.now().strftime("%Y-%m-%d")}"></label>
+    <div class="row" style="grid-column:1/-1"><button class="b primary" type="submit">Import posts</button>
+      <span class="muted">Up to 100 posts at a time.{" Each post uses a little OpenAI credit." if self.settings.effective_key else ""}</span></div>
+  </form>
+</section>"""
+        return self.shell("Import posts", "/import", body)
 
     # --- actions ----------------------------------------------------------
     def post(self, path: str, form: dict[str, str]) -> str:
@@ -331,6 +370,8 @@ class App:
             return "/campaigns"
         if path == "/add":
             return self._add(form)
+        if path == "/import":
+            return self._import(form)
         if path == "/reanalyse":
             errors = 0
             for l in self.listings:
@@ -345,45 +386,99 @@ class App:
             return "/"
         return "/"
 
+    def _is_duplicate(self, caption: str) -> bool:
+        key = " ".join(caption.lower().split())
+        return any(" ".join(l.caption.lower().split()) == key for l in self.listings)
+
+    def _build(self, caption: str, form: dict[str, str], extra_evidence: list[TextEvidence]) -> Listing:
+        """Create a listing, reading any detail the form left blank from the post text."""
+        phone, email = form.get("phone", "").strip(), form.get("email", "").strip()
+        if phone and not _valid_phone(phone):
+            raise ValueError("The phone number needs at least 9 digits.")
+        if email and not _valid_email(email):
+            raise ValueError("The email address doesn't look right.")
+        price = _int(form.get("price", ""))
+        base = max(0, min(100, _int(form.get("base_score", "")) or 70))
+        scam = max(0, min(100, _int(form.get("scam_risk", "")) or 0))
+        posted = datetime.strptime(form["posted"], "%Y-%m-%d").replace(tzinfo=timezone.utc) if form.get("posted") else None
+        location = form.get("location", "").strip()
+        owner_choice = form.get("owner", "auto")
+
+        full_text = "\n".join([caption] + [e.text for e in extra_evidence])
+        places = [p for c in self.campaigns for p in c.locations]
+        found = extract_listing(full_text, places, self.settings.effective_key, self.settings.openai_model)
+        phone = phone or found.phone or ""
+        email = email or found.email or ""
+        location = location or found.location or form.get("default_location", "").strip()
+        owner = {"yes": True, "no": False}.get(owner_choice, found.is_direct_owner or False)
+        return Listing(
+            id=f"M{datetime.now().strftime('%y%m%d%H%M%S')}{secrets.token_hex(2)}",
+            post_url=form.get("url", "").strip(), location=location, price=price if price is not None else found.price,
+            caption=caption, is_direct_owner=owner, public_phone=phone or None,
+            public_email=email or None, has_eligible_contact=bool(phone or email), matches_target_location=True,
+            posted_at=posted, scam_risk_score=scam, base_opportunity_score=base,
+            evidence=[TextEvidence(EvidenceSource.CAPTION, caption)] + extra_evidence,
+        )
+
     def _add(self, form: dict[str, str]) -> str:
         caption = form.get("caption", "").strip()
-        phone, email = form.get("phone", "").strip(), form.get("email", "").strip()
+        extra = []
+        if form.get("image_text", "").strip():
+            extra.append(TextEvidence(EvidenceSource.IMAGE_OCR, form["image_text"].strip()))
+        if form.get("owner_comment", "").strip():
+            extra.append(TextEvidence(EvidenceSource.COMMENT, form["owner_comment"].strip()))
         try:
             if not caption:
                 raise ValueError("Paste the post text.")
-            if phone and not _valid_phone(phone):
-                raise ValueError("The phone number needs at least 9 digits.")
-            if email and not _valid_email(email):
-                raise ValueError("The email address doesn't look right.")
-            price = _int(form.get("price", ""))
-            base = max(0, min(100, _int(form.get("base_score", "")) or 0))
-            scam = max(0, min(100, _int(form.get("scam_risk", "")) or 0))
-            posted = datetime.strptime(form["posted"], "%Y-%m-%d").replace(tzinfo=timezone.utc) if form.get("posted") else None
+            if self._is_duplicate(caption):
+                raise ValueError("This post is already in ListingAI.")
+            listing = self._build(caption, form, extra)
         except ValueError as e:
             self.say(str(e), True)
             return "/add"
-        evidence = [TextEvidence(EvidenceSource.CAPTION, caption)]
-        if form.get("image_text", "").strip():
-            evidence.append(TextEvidence(EvidenceSource.IMAGE_OCR, form["image_text"].strip()))
-        if form.get("owner_comment", "").strip():
-            evidence.append(TextEvidence(EvidenceSource.COMMENT, form["owner_comment"].strip()))
-        listing = Listing(
-            id=f"M{datetime.now().strftime('%y%m%d%H%M%S')}{secrets.token_hex(1)}",
-            post_url=form.get("url", "").strip(), location=form.get("location", "").strip(), price=price,
-            caption=caption, is_direct_owner="direct_owner" in form, public_phone=phone or None,
-            public_email=email or None, has_eligible_contact=bool(phone or email), matches_target_location=True,
-            posted_at=posted, scam_risk_score=scam, base_opportunity_score=base, evidence=evidence,
-        )
         self.classify(listing, use_ai=True)
         self.listings.append(listing)
         self.refresh()
+        found = ", ".join(x for x in [listing.location, f"RM{listing.price:,}" if listing.price else "", listing.public_contact or ""] if x)
         if listing.exclusive_agent is None:
-            self.say("Added. It has no public phone or email, so agent intent was not checked.")
+            self.say(f"Added ({found or 'no details found'}). No public phone or email was found, so agent intent was not checked.")
         else:
             ea = listing.exclusive_agent
             quote = f": “{ea.exclusive_agent_evidence}”" if ea.exclusive_agent_evidence else ""
-            self.say(f"Added {listing.location} listing as {ea.exclusive_agent_status.value.replace('_', ' ')}{quote}"
+            self.say(f"Added ({found}) as {ea.exclusive_agent_status.value.replace('_', ' ')}{quote}"
                      + (" (checked with AI)" if "openai" in ea.classified_by else ""))
+        return "/"
+
+    def _import(self, form: dict[str, str]) -> str:
+        posts = split_posts(form.get("posts", ""))
+        if not posts:
+            self.say("Paste at least one post.", True)
+            return "/import"
+        if len(posts) > 100:
+            self.say(f"That's {len(posts)} posts. Import up to 100 at a time.", True)
+            return "/import"
+        added = dupes = no_contact = 0
+        for text in posts:
+            if self._is_duplicate(text):
+                dupes += 1
+                continue
+            try:
+                listing = self._build(text, {"posted": form.get("posted", ""),
+                                             "default_location": form.get("default_location", "")}, [])
+            except ValueError:
+                continue
+            self.classify(listing, use_ai=True)
+            self.listings.append(listing)
+            added += 1
+            if not listing.public_contact:
+                no_contact += 1
+        self.refresh()
+        parts = [f"Imported {added} of {len(posts)} posts."]
+        if dupes:
+            parts.append(f"{dupes} already in ListingAI.")
+        if no_contact:
+            parts.append(f"{no_contact} had no public phone or email, so agent intent was not checked.")
+        self.say(" ".join(parts))
         return "/"
 
 
@@ -423,7 +518,9 @@ def make_handler(app: App):
                 if url.path == "/campaigns":
                     return self._send(200, app.campaigns_page(q.get("edit", [""])[0]))
                 if url.path == "/add":
-                    return self._send(200, app.add_page())
+                    return self._send(200, app.add_page({k: v[0] for k, v in q.items()}))
+                if url.path == "/import":
+                    return self._send(200, app.import_page())
             self._send(404, "Not found")
 
         def do_POST(self):
@@ -468,6 +565,7 @@ def serve(port: int = 8000, seed_csv: Optional[Path] = None, open_browser: bool 
     httpd = bind_server(app, port)
     actual = httpd.server_address[1]
     url = f"http://127.0.0.1:{actual}/"
+    app.base_url = url
     if actual != port:
         print(f"Port {port} is used by another program, so ListingAI is using port {actual} instead.")
     print(f"ListingAI is running at {url}\nPress Ctrl+C to stop.")
