@@ -42,7 +42,10 @@ This opens http://127.0.0.1:8321 in your browser (or the next free port, which i
   link, tagged e.g. "PropertyGuru email alert") and is matched to your campaigns. Alerts are read every
   15/30/60 minutes while the app runs, or with **Check email now**. Emails are read-only and stay unread;
   ListingAI never visits the property sites itself.
-  **Web search**: with a Brave Search API key, ListingAI searches the web for each place in your active
+  **Automatic web search** (default: OpenAI web search with the OpenAI key you already saved; Brave Search
+  API as an alternative): the first search runs a minute after start-up, then every 3/6/12/24 hours. Only
+  listings whose link the search itself cited are kept, and phone numbers from AI search results are never used.
+  With a Brave Search API key, ListingAI searches the web for each place in your active
   campaigns (e.g. `"Sungai Petani" rumah dijual owner`, past week) every 6/12/24 hours or on demand, and adds
   results that look like property listings. It uses only the title, description and link from the official
   search API; it never opens or crawls the pages. Google is not used because it does not allow automated searching.

@@ -129,3 +129,106 @@ def run_search(places: Iterable[str], api_key: str, cursor: int = 0, max_queries
         run.queries.append((q, kept))
     run.next_cursor = (start + len(batch)) % len(queries)
     return run
+
+
+# --- OpenAI web search (uses the OpenAI key saved for post checking) -------------
+
+OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses"
+_OPENAI_PROMPT = """Search the web for residential properties FOR SALE in Malaysia in these places: {places}.
+Prefer listings posted by the owner ("owner", "pemilik", "tuan rumah", "direct owner"), posted in the last 7 days,
+on sites such as mudah.my, propertyguru.com.my, iproperty.com.my, or public Facebook posts.
+Only include listings you actually found in the search results. Never invent listings, prices or links.
+Reply with JSON only, no other text:
+{{"listings": [{{"title": "...", "url": "<exact URL of the listing page>", "price_rm": <number or null>,
+"location": "<place>", "description": "<one sentence from the listing>"}}]}}"""
+
+
+def _openai_call(body: dict, api_key: str, opener: Optional[Opener]) -> dict:
+    opener = opener or urllib.request.urlopen
+    req = urllib.request.Request(OPENAI_RESPONSES_URL, data=json.dumps(body).encode(), method="POST", headers={
+        "Authorization": f"Bearer {api_key}", "Content-Type": "application/json"})
+    try:
+        with opener(req, timeout=120) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        detail = ""
+        try:
+            detail = json.loads(e.read().decode("utf-8")).get("error", {}).get("message", "")
+        except Exception:
+            pass
+        if e.code == 401:
+            raise SearchError("OpenAI rejected the API key. Check it in Settings.") from None
+        if e.code == 429:
+            raise SearchError("OpenAI rate limit or credit reached. Check billing on platform.openai.com.") from None
+        raise SearchError(f"OpenAI web search error {e.code}: {detail or e.reason}") from None
+    except urllib.error.URLError as e:
+        raise SearchError(f"Could not reach OpenAI: {e.reason}") from None
+
+
+def _openai_search(places: list[str], api_key: str, model: str, opener: Optional[Opener]) -> tuple[str, set[str]]:
+    """Return (answer text, URLs the search actually cited)."""
+    body = {"model": model, "input": _OPENAI_PROMPT.format(places=", ".join(places)), "tools": [{"type": "web_search"}]}
+    try:
+        data = _openai_call(body, api_key, opener)
+    except SearchError as e:
+        if "web_search" not in str(e) and "tool" not in str(e).lower():
+            raise
+        body["tools"] = [{"type": "web_search_preview"}]  # older name of the same tool
+        data = _openai_call(body, api_key, opener)
+    texts, cited = [], set()
+    for item in data.get("output") or []:
+        if item.get("type") != "message":
+            continue
+        for part in item.get("content") or []:
+            if part.get("type") == "output_text":
+                texts.append(part.get("text") or "")
+                for ann in part.get("annotations") or []:
+                    if ann.get("type") == "url_citation" and ann.get("url"):
+                        cited.add(ann["url"])
+    return "\n".join(texts), cited
+
+
+def _norm_url(url: str) -> str:
+    p = urllib.parse.urlparse(url.strip())
+    query = "&".join(q for q in p.query.split("&") if q and not q.startswith("utm_"))
+    return f"{p.netloc.lower().removeprefix('www.')}{p.path.rstrip('/')}" + (f"?{query}" if query else "")
+
+
+def run_openai_search(places: Iterable[str], api_key: str, model: str, cursor: int = 0, places_per_call: int = 3,
+                      max_calls: int = 4, opener: Optional[Opener] = None) -> SearchRun:
+    """Search with OpenAI's web search tool. Only listings whose link the search cited are kept."""
+    if not api_key:
+        raise SearchError("Add your OpenAI API key in Settings first.")
+    unique = list(dict.fromkeys(" ".join(p.split()) for p in places if p.strip()))
+    if not unique:
+        raise SearchError("Create a campaign with at least one place first.")
+    groups = [unique[i:i + places_per_call] for i in range(0, len(unique), places_per_call)]
+    start = cursor % len(groups)
+    batch = [groups[(start + i) % len(groups)] for i in range(min(max_calls, len(groups)))]
+    run = SearchRun()
+    seen: set[str] = set()
+    for group in batch:
+        text, cited = _openai_search(group, api_key, model, opener)
+        cited_norm = {_norm_url(u) for u in cited}
+        match = re.search(r"\{.*\}", text, re.S)
+        try:
+            listings = json.loads(match.group(0)).get("listings", []) if match else []
+        except (json.JSONDecodeError, AttributeError):
+            listings = []
+        kept = 0
+        for item in listings if isinstance(listings, list) else []:
+            url = str(item.get("url") or "")
+            if not url.startswith("http") or _norm_url(url) not in cited_norm or url in seen:
+                continue  # a link the search did not return may be made up
+            title, desc = _clean(str(item.get("title") or "")), _clean(str(item.get("description") or ""))
+            if not looks_like_listing(title, desc, url):
+                continue
+            seen.add(url)
+            price = item.get("price_rm")
+            price = int(price) if isinstance(price, (int, float)) and 1_000 <= price <= 100_000_000 else find_price(f"{title} {desc}")
+            loc = find_location(f"{item.get('location') or ''} {title} {desc}", group)
+            run.results.append(WebResult(title, url, desc, price, loc, "OpenAI: " + ", ".join(group)))
+            kept += 1
+        run.queries.append(("OpenAI web search: " + ", ".join(group), kept))
+    run.next_cursor = (start + len(batch)) % len(groups)
+    return run

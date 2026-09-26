@@ -47,6 +47,7 @@ class Settings:
     email_last_check: str = ""
     # Web search through the Brave Search API.
     brave_api_key: str = ""
+    web_provider: str = "openai"  # openai | brave
     web_search_hours: int = 12  # 0 = only when "Search the web now" is clicked
     web_cursor: int = 0
     web_last_run: str = ""
@@ -62,6 +63,10 @@ class Settings:
         if not key:
             return ""
         return f"{key[:3]}…{key[-4:]}" if len(key) > 10 else "saved"
+
+    @property
+    def web_search_ready(self) -> bool:
+        return bool(self.brave_api_key) if self.web_provider == "brave" else bool(self.effective_key)
 
 
 def _write_private(path: Path, text: str) -> None:
@@ -91,6 +96,7 @@ def load_settings() -> Settings:
         email_seen=list(raw.get("email_seen", [])),
         email_last_check=raw.get("email_last_check", ""),
         brave_api_key=raw.get("brave_api_key", ""),
+        web_provider=raw.get("web_provider") or defaults.web_provider,
         web_search_hours=int(raw.get("web_search_hours", defaults.web_search_hours)),
         web_cursor=int(raw.get("web_cursor", 0)),
         web_last_run=raw.get("web_last_run", ""),

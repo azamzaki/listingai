@@ -29,7 +29,7 @@ from .exclusive_agent import classify_exclusive_agent
 from .examples import is_example
 from .extract import extract_listing, extract_with_rules, split_posts
 from .mailalerts import SITES, MailError, fetch_alert_items
-from .websearch import SearchError, run_search
+from .websearch import SearchError, run_openai_search, run_search
 from .llm import OpenAIError, classify_with_ai, test_api_key
 from .models import EvidenceSource, ExclusiveAgentStatus as S, Listing, TextEvidence
 from .settings import Settings, data_dir, load_settings, load_store, save_settings, save_store
@@ -268,43 +268,52 @@ class App:
 
     def _web_section(self) -> str:
         s, c = self.settings, self.csrf
-        on = bool(s.brave_api_key)
         places = sorted({p for camp in self.campaigns if camp.active for p in camp.locations})
-        status = (f'<span class="status on"><span class="dot"></span>Brave Search key saved (…{_esc(s.brave_api_key[-4:])})</span>'
-                  if on else '<span class="status"><span class="dot"></span>Not connected</span>')
+        using = "your OpenAI key" if s.web_provider != "brave" else "Brave Search"
+        if s.web_search_ready and s.web_search_hours:
+            status = f'<span class="status on"><span class="dot"></span>Automatic: every {s.web_search_hours} hours with {using}</span>'
+        elif s.web_search_ready:
+            status = f'<span class="status on"><span class="dot"></span>Ready ({using}); runs when you click Search</span>'
+        else:
+            status = ('<span class="status"><span class="dot"></span>Off: add your OpenAI key above</span>' if s.web_provider != "brave"
+                      else '<span class="status"><span class="dot"></span>Off: add a Brave Search key</span>')
         last = f'<span class="muted">Last search {_esc(s.web_last_run[:16].replace("T", " "))}</span>' if s.web_last_run else ""
         now_btn = (f'<form class="inline" method="post" action="/settings/web/run"><input type="hidden" name="csrf" value="{c}">'
-                   f'<button class="b" type="submit">Search the web now</button></form>') if on else ""
+                   f'<button class="b" type="submit">Search the web now</button></form>') if s.web_search_ready else ""
         remove = (f'<form class="inline" method="post" action="/settings/web/remove"><input type="hidden" name="csrf" value="{c}">'
-                  f'<button class="b danger" type="submit">Remove key</button></form>') if on else ""
+                  f'<button class="b danger" type="submit">Remove Brave key</button></form>') if s.brave_api_key else ""
         report = ""
         r = self.last_web_report
         if r:
             rows = "".join(f"<tr><td>{_esc(q)}</td><td class='num'>{n}</td></tr>" for q, n in r["queries"])
             report = (f"<h3 style='margin:8px 0 0;font:700 15px var(--display)'>Last search · {_esc(r['at'])}</h3>"
                       f"<p>{r['added']} new listings added, {r['dupes']} already in ListingAI, {r['in_campaigns']} in your campaigns.</p>"
-                      f"<div style='overflow-x:auto'><table><thead><tr><th>Search</th><th>Property results</th></tr></thead>"
+                      f"<div style='overflow-x:auto'><table><thead><tr><th>Search</th><th>Listings kept</th></tr></thead>"
                       f"<tbody>{rows}</tbody></table></div>")
         every = "".join(f'<option value="{h}"{" selected" if h == s.web_search_hours else ""}>{label}</option>'
-                        for h, label in [(6, "6 hours"), (12, "12 hours"), (24, "1 day"), (0, "Only when I click Search")])
+                        for h, label in [(3, "3 hours"), (6, "6 hours"), (12, "12 hours"), (24, "1 day"), (0, "Only when I click Search")])
+        provider = "".join(f'<option value="{v}"{" selected" if v == s.web_provider else ""}>{label}</option>'
+                           for v, label in [("openai", "OpenAI web search (uses your OpenAI key)"), ("brave", "Brave Search API (separate key)")])
         return f"""
 <section class="card">
-  <h2>Web search</h2>
-  <p>ListingAI searches the web for each place in your active campaigns ({len(places)} places, e.g.
-  “{_esc(places[0]) if places else 'Sungai Petani'} rumah dijual owner”) and adds property results from the past week
-  to the dashboard. It uses Brave Search's official API, because Google does not allow automated searching.</p>
-  <p class="muted">Search engines list Mudah, PropertyGuru and iProperty pages but almost no Facebook group posts, and
-  results show a title, short description and link, rarely a phone number. Each search uses one query from your Brave
-  plan; each run makes up to 15 and continues with the next places on the following run.
-  Get a key at api-dashboard.search.brave.com.</p>
+  <h2>Automatic web search</h2>
+  <p>While ListingAI is open, it searches the web by itself for property for sale in the places of your active campaigns
+  ({len(places)} places{', e.g. ' + _esc(', '.join(places[:3])) if places else ''}), favouring owner listings from the past
+  week, and adds new ones to the dashboard. The first search runs a minute after you start ListingAI.</p>
+  <p class="muted">Search engines show Mudah, PropertyGuru, iProperty and public pages, but almost no Facebook group or
+  Marketplace posts. A listing is kept only if its link came from the search itself, so the AI cannot invent listings.
+  Phone numbers are not taken from search results; open the listing to get the owner's number. Each OpenAI run makes up
+  to 4 searches, which uses some OpenAI credit.</p>
   <div class="row">{status}{last}</div>
   <form method="post" action="/settings/web" class="grid2" autocomplete="off">
     <input type="hidden" name="csrf" value="{c}">
-    <label class="field" for="w_key">Brave Search API key
-      <input id="w_key" name="brave_api_key" type="password" spellcheck="false"
-        placeholder="{'Leave blank to keep the saved key' if on else 'BSA…'}"></label>
+    <label class="field" for="w_provider">Search with
+      <select id="w_provider" name="web_provider">{provider}</select></label>
     <label class="field" for="w_every">Search every
       <select id="w_every" name="web_search_hours">{every}</select></label>
+    <label class="field" for="w_key"><span>Brave Search API key <span class="hint">· only if you chose Brave</span></span>
+      <input id="w_key" name="brave_api_key" type="password" spellcheck="false"
+        placeholder="{'Leave blank to keep the saved key' if s.brave_api_key else 'BSA…'}"></label>
     <div class="row" style="grid-column:1/-1"><button class="b primary" type="submit">Save web search settings</button></div>
   </form>
   <div class="row">{now_btn}{remove}</div>
@@ -314,9 +323,14 @@ class App:
     def search_web_now(self) -> str:
         with self.lock:
             places = [p for camp in self.campaigns if camp.active for p in camp.locations]
-            key, cursor = self.settings.brave_api_key, self.settings.web_cursor
+            st = self.settings
+            provider, cursor = st.web_provider, st.web_cursor
+            brave_key, ai_key, model = st.brave_api_key, st.effective_key, st.openai_model
         try:
-            run = run_search(places, key, cursor)
+            if provider == "brave":
+                run = run_search(places, brave_key, cursor)
+            else:
+                run = run_openai_search(places, ai_key, model, cursor)
         except SearchError as e:
             return str(e)
         with self.lock:
@@ -338,8 +352,12 @@ class App:
                     posted_at=datetime.now(timezone.utc), base_opportunity_score=65,
                     source=f"Web search ({urlparse(r.url).netloc.removeprefix('www.')})",
                 )
+                if provider != "brave":
+                    # Phone numbers from AI search results can't be checked against the page: never use them.
+                    listing.public_phone = listing.public_email = None
+                    listing.has_eligible_contact = False
                 self.listings.append(listing)
-                if found.phone or found.email:
+                if listing.has_eligible_contact:
                     self.classify(listing, use_ai=True)
                 added += 1
             self.settings.web_cursor = run.next_cursor
@@ -350,7 +368,7 @@ class App:
             in_campaigns = sum(1 for l in new if l.campaign_ids)
             self.last_web_report = {"at": datetime.now().strftime("%d %b %H:%M"), "queries": run.queries,
                                     "added": added, "dupes": dupes, "in_campaigns": in_campaigns}
-        return (f"Ran {len(run.queries)} searches: {added} new listing{'s' if added != 1 else ''} added"
+        return (f"Ran {len(run.queries)} search{'es' if len(run.queries) != 1 else ''}: {added} new listing{'s' if added != 1 else ''} added"
                 + (f", {dupes} already in ListingAI" if dupes else "") + f", {in_campaigns} in your campaigns.")
 
     # --- email alerts -------------------------------------------------------
@@ -604,6 +622,8 @@ document.querySelectorAll('.preset').forEach(function(b){b.addEventListener('cli
             self.say("Email settings saved. Click Check email now to test them.")
             return "/settings"
         if path == "/settings/web":
+            if form.get("web_provider") in ("openai", "brave"):
+                self.settings.web_provider = form["web_provider"]
             if form.get("brave_api_key", "").strip():
                 self.settings.brave_api_key = form["brave_api_key"].strip()
             try:
@@ -887,7 +907,13 @@ def _background_loop(app: App, tick: float = 60.0) -> None:
     import time
 
     last_email = 0.0
-    last_web = time.time()  # first web search after one full interval, not at start-up
+    # First web search shortly after start-up unless one ran within the chosen interval.
+    last_web = 0.0
+    if app.settings.web_last_run:
+        try:
+            last_web = datetime.fromisoformat(app.settings.web_last_run).timestamp()
+        except ValueError:
+            pass
     while True:
         time.sleep(tick)
         s = app.settings
@@ -895,7 +921,7 @@ def _background_loop(app: App, tick: float = 60.0) -> None:
         if s.email_address and s.email_app_password and s.email_check_minutes and now - last_email >= s.email_check_minutes * 60:
             last_email = now
             print(f"[{datetime.now():%H:%M}] Email alerts: {app.check_email_now()}")
-        if s.brave_api_key and s.web_search_hours and now - last_web >= s.web_search_hours * 3600:
+        if s.web_search_ready and s.web_search_hours and now - last_web >= s.web_search_hours * 3600:
             last_web = now
             print(f"[{datetime.now():%H:%M}] Web search: {app.search_web_now()}")
 

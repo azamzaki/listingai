@@ -89,6 +89,75 @@ class Search(unittest.TestCase):
             run_search(["Kulim"], "bad", opener=fake_brave(401), pause=0)
 
 
+def fake_openai_search(listings, cited, status=200, reject_tool=False):
+    calls = []
+
+    def opener(req, timeout=None):
+        body = json.loads(req.data)
+        calls.append(body)
+        if status != 200:
+            raise urllib.error.HTTPError(req.full_url, status, "err", {}, io.BytesIO(b'{"error":{"message":"x"}}'))
+        if reject_tool and body["tools"][0]["type"] == "web_search":
+            raise urllib.error.HTTPError(req.full_url, 400, "err", {},
+                                         io.BytesIO(b'{"error":{"message":"Unsupported tool type: web_search"}}'))
+        text = "Here you go:\n```json\n" + json.dumps({"listings": listings}) + "\n```"
+        return _Resp(json.dumps({"output": [
+            {"type": "web_search_call", "status": "completed"},
+            {"type": "message", "content": [{"type": "output_text", "text": text,
+             "annotations": [{"type": "url_citation", "url": u, "title": "t"} for u in cited]}]},
+        ]}).encode())
+
+    opener.calls = calls
+    return opener
+
+
+class OpenAISearch(unittest.TestCase):
+    LISTINGS = [
+        {"title": "Rumah teres Sungai Petani untuk dijual owner", "url": "https://www.mudah.my/rumah-sp-777.htm",
+         "price_rm": 380000, "location": "Sungai Petani", "description": "Owner jual, 4 bilik, 012-9999999"},
+        {"title": "Made-up house for sale Kulim", "url": "https://www.mudah.my/does-not-exist-1.htm",
+         "price_rm": 250000, "location": "Kulim", "description": "Not a real result"},
+    ]
+
+    def test_only_cited_links_are_kept(self):
+        from listingai.websearch import run_openai_search
+        opener = fake_openai_search(self.LISTINGS, ["https://mudah.my/rumah-sp-777.htm?utm_source=openai"])
+        run = run_openai_search(["Sungai Petani", "Kulim"], "sk-x", "gpt-test", opener=opener)
+        self.assertEqual([r.url for r in run.results], ["https://www.mudah.my/rumah-sp-777.htm"])
+        self.assertEqual((run.results[0].price, run.results[0].location), (380_000, "Sungai Petani"))
+        self.assertEqual(opener.calls[0]["tools"], [{"type": "web_search"}])
+
+    def test_falls_back_to_older_tool_name(self):
+        from listingai.websearch import run_openai_search
+        opener = fake_openai_search(self.LISTINGS, ["https://www.mudah.my/rumah-sp-777.htm"], reject_tool=True)
+        run = run_openai_search(["Sungai Petani"], "sk-x", "m", opener=opener)
+        self.assertEqual(len(run.results), 1)
+        self.assertEqual(opener.calls[-1]["tools"], [{"type": "web_search_preview"}])
+
+    def test_errors(self):
+        from listingai.websearch import run_openai_search
+        with self.assertRaisesRegex(SearchError, "OpenAI API key"):
+            run_openai_search(["Kulim"], "", "m")
+        with self.assertRaisesRegex(SearchError, "rejected"):
+            run_openai_search(["Kulim"], "sk-bad", "m", opener=fake_openai_search([], [], status=401))
+
+    def test_app_never_uses_ai_search_phone_numbers(self):
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {"LISTINGAI_HOME": tmp, "OPENAI_API_KEY": ""}):
+            from listingai.campaigns import new_campaign
+            from listingai.server import App
+            app = App(None)
+            app.campaigns = [new_campaign("Kedah", ["Sungai Petani"])]
+            app.settings.openai_api_key = "sk-x"
+            self.assertTrue(app.settings.web_search_ready)
+            opener = fake_openai_search(self.LISTINGS, ["https://www.mudah.my/rumah-sp-777.htm"])
+            with mock.patch("listingai.websearch.urllib.request.urlopen", opener):
+                self.assertEqual(app.search_web_now(), "Ran 1 search: 1 new listing added, 1 in your campaigns.")
+            l = app.listings[0]
+            self.assertIsNone(l.public_phone)
+            self.assertFalse(l.has_eligible_contact)
+            self.assertIn("Automatic", app.settings_page())
+
+
 class AppFlow(unittest.TestCase):
     def test_search_now_adds_listings_once(self):
         with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {"LISTINGAI_HOME": tmp}):
@@ -97,6 +166,7 @@ class AppFlow(unittest.TestCase):
             app = App(None)
             app.campaigns = [new_campaign("Kedah", ["Sungai Petani", "Kulim"], max_price=300_000)]
             app.settings.brave_api_key = "BSA-key"
+            app.settings.web_provider = "brave"
             with mock.patch("listingai.websearch.urllib.request.urlopen", fake_brave()), \
                  mock.patch("listingai.websearch.time.sleep"):
                 msg = app.search_web_now()
