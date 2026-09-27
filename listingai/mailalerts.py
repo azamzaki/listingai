@@ -226,6 +226,18 @@ def fetch_alert_items(address: str, app_password: str, host: str, sites: Iterabl
         new_seen: list[str] = []
         report: list[dict] = []
         read = 0
+        if not ids:
+            # No email from the sites' usual addresses: list who did send emails mentioning them,
+            # so an alert from a different sender address can be recognised.
+            for key in sites:
+                status, data = imap.search(None, "SINCE", since, "TEXT", f'"{SITES[key].name}"')
+                for msg_id in (data[0].split() if status == "OK" and data and data[0] else [])[-5:]:
+                    status, hdr = imap.fetch(msg_id, "(BODY.PEEK[HEADER.FIELDS (FROM SUBJECT)])")
+                    if status == "OK" and hdr and isinstance(hdr[0], tuple):
+                        h = email.message_from_bytes(hdr[0][1])
+                        report.append({"from": _decode(h.get("From")), "subject": _decode(h.get("Subject"))[:120],
+                                       "date": "", "listings": None,
+                                       "note": f"mentions {SITES[key].name} but is not from its alert address"})
         for msg_id in dict.fromkeys(ids):  # unique, order kept
             status, data = imap.fetch(msg_id, "(BODY.PEEK[])")  # PEEK keeps the email unread
             if status != "OK" or not data or not isinstance(data[0], tuple):

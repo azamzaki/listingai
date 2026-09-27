@@ -285,10 +285,11 @@ class App:
         report = ""
         r = self.last_web_report
         if r:
-            rows = "".join(f"<tr><td>{_esc(q)}</td><td class='num'>{n}</td></tr>" for q, n in r["queries"])
+            rows = "".join(f"<tr><td>{_esc(q)}</td><td class='num'>{n}</td><td class='muted'>{_esc(note)}</td></tr>"
+                           for q, n, note in r["queries"])
             report = (f"<h3 style='margin:8px 0 0;font:700 15px var(--display)'>Last search · {_esc(r['at'])}</h3>"
                       f"<p>{r['added']} new listings added, {r['dupes']} already in ListingAI, {r['in_campaigns']} in your campaigns.</p>"
-                      f"<div style='overflow-x:auto'><table><thead><tr><th>Search</th><th>Listings kept</th></tr></thead>"
+                      f"<div style='overflow-x:auto'><table><thead><tr><th>Search</th><th>Listings kept</th><th>Why</th></tr></thead>"
                       f"<tbody>{rows}</tbody></table></div>")
         every = "".join(f'<option value="{h}"{" selected" if h == s.web_search_hours else ""}>{label}</option>'
                         for h, label in [(3, "3 hours"), (6, "6 hours"), (12, "12 hours"), (24, "1 day"), (0, "Only when I click Search")])
@@ -349,8 +350,9 @@ class App:
                     post_url=r.url, location=r.location or found.location or "", price=r.price, caption=text,
                     is_direct_owner=bool(found.is_direct_owner), public_phone=found.phone, public_email=found.email,
                     has_eligible_contact=bool(found.phone or found.email), matches_target_location=True,
-                    posted_at=datetime.now(timezone.utc), base_opportunity_score=65,
-                    source=f"Web search ({urlparse(r.url).netloc.removeprefix('www.')})",
+                    posted_at=datetime.now(timezone.utc), base_opportunity_score=65 if r.confirmed else 55,
+                    source=f"Web search ({urlparse(r.url).netloc.removeprefix('www.')}"
+                           + ("" if r.confirmed else ", link not confirmed") + ")",
                 )
                 if provider != "brave":
                     # Phone numbers from AI search results can't be checked against the page: never use them.
@@ -366,7 +368,9 @@ class App:
             self.refresh()
             new = [l for l in self.listings if l.id not in before]
             in_campaigns = sum(1 for l in new if l.campaign_ids)
-            self.last_web_report = {"at": datetime.now().strftime("%d %b %H:%M"), "queries": run.queries,
+            notes = run.notes + [""] * (len(run.queries) - len(run.notes))
+            self.last_web_report = {"at": datetime.now().strftime("%d %b %H:%M"),
+                                    "queries": [(q, n, note) for (q, n), note in zip(run.queries, notes)],
                                     "added": added, "dupes": dupes, "in_campaigns": in_campaigns}
         return (f"Ran {len(run.queries)} search{'es' if len(run.queries) != 1 else ''}: {added} new listing{'s' if added != 1 else ''} added"
                 + (f", {dupes} already in ListingAI" if dupes else "") + f", {in_campaigns} in your campaigns.")
@@ -426,7 +430,12 @@ class App:
                                 "outside": [(l.location or "unknown place", l.price) for l in new if not l.campaign_ids][:10]}
         if not result.emails_read:
             total = sum(result.found_per_site.values())
-            return ("No alert emails from the property sites in the last 14 days." if not total
+            others = [e for e in result.report if "not from its alert address" in e["note"]]
+            if others:
+                return (f"No alerts from the sites' usual addresses, but {len(others)} emails mention them, "
+                        f"e.g. from {others[0]['from']}. See the list in Settings and send it to be added.")
+            return ("No alert emails from the property sites in the last 14 days. Check that your saved searches "
+                    "on the sites have email alerts turned on." if not total
                     else "No new alert emails since the last check.")
         msg = (f"Read {result.emails_read} alert email{'s' if result.emails_read != 1 else ''}: "
                f"{added} new listing{'s' if added != 1 else ''} added")

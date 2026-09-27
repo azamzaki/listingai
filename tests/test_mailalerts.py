@@ -63,8 +63,11 @@ class FakeImap:
         return "OK", [b"1"]
 
     def search(self, charset, *criteria):
-        domain = criteria[-1].strip('"')
-        ids = [i for i, (d, _) in self.messages.items() if d == domain]
+        term = criteria[-1].strip('"')
+        if criteria[-2] == "TEXT":
+            ids = [i for i, (_, raw) in self.messages.items() if term.lower().encode() in raw.lower()]
+        else:
+            ids = [i for i, (d, _) in self.messages.items() if d == term]
         return "OK", [b" ".join(ids)]
 
     def fetch(self, msg_id, spec):
@@ -111,6 +114,13 @@ class Fetching(unittest.TestCase):
         self.assertTrue(all("PEEK" in s for s in self.imap.fetch_specs))
         again = fetch_alert_items("me@gmail.com", "goodpass", "h", ["mudah", "propertyguru"], r.new_seen, imap_factory=self.imap)
         self.assertEqual((again.emails_read, again.items), (0, []))
+
+    def test_other_sender_is_reported(self):
+        imap = FakeImap({b"9": ("carousell.com", make_email("Mudah <alerts@carousell.com>", "Iklan baru Mudah", PG_HTML, mid="<c@x>"))})
+        r = fetch_alert_items("me@gmail.com", "goodpass", "h", ["mudah"], [], imap_factory=imap)
+        self.assertEqual(r.emails_read, 0)
+        self.assertEqual(r.report[0]["from"], "Mudah <alerts@carousell.com>")
+        self.assertIn("not from its alert address", r.report[0]["note"])
 
     def test_errors(self):
         with self.assertRaises(MailError):

@@ -117,13 +117,18 @@ class OpenAISearch(unittest.TestCase):
          "price_rm": 380000, "location": "Sungai Petani", "description": "Owner jual, 4 bilik, 012-9999999"},
         {"title": "Made-up house for sale Kulim", "url": "https://www.mudah.my/does-not-exist-1.htm",
          "price_rm": 250000, "location": "Kulim", "description": "Not a real result"},
+        {"title": "Made-up house for sale Kulim", "url": "https://random-blog.example/house-kulim",
+         "price_rm": 250000, "location": "Kulim", "description": "Site the search never visited"},
     ]
 
     def test_only_cited_links_are_kept(self):
         from listingai.websearch import run_openai_search
         opener = fake_openai_search(self.LISTINGS, ["https://mudah.my/rumah-sp-777.htm?utm_source=openai"])
         run = run_openai_search(["Sungai Petani", "Kulim"], "sk-x", "gpt-test", opener=opener)
-        self.assertEqual([r.url for r in run.results], ["https://www.mudah.my/rumah-sp-777.htm"])
+        # Cited exactly: confirmed. Same property site as a cited link: kept, not confirmed. Other site: dropped.
+        self.assertEqual([(r.url, r.confirmed) for r in run.results], [
+            ("https://www.mudah.my/rumah-sp-777.htm", True), ("https://www.mudah.my/does-not-exist-1.htm", False)])
+        self.assertIn("1 dropped (link not from the search)", run.notes[0])
         self.assertEqual((run.results[0].price, run.results[0].location), (380_000, "Sungai Petani"))
         self.assertEqual(opener.calls[0]["tools"], [{"type": "web_search"}])
 
@@ -131,7 +136,7 @@ class OpenAISearch(unittest.TestCase):
         from listingai.websearch import run_openai_search
         opener = fake_openai_search(self.LISTINGS, ["https://www.mudah.my/rumah-sp-777.htm"], reject_tool=True)
         run = run_openai_search(["Sungai Petani"], "sk-x", "m", opener=opener)
-        self.assertEqual(len(run.results), 1)
+        self.assertEqual(len(run.results), 2)
         self.assertEqual(opener.calls[-1]["tools"], [{"type": "web_search_preview"}])
 
     def test_errors(self):
@@ -151,11 +156,22 @@ class OpenAISearch(unittest.TestCase):
             self.assertTrue(app.settings.web_search_ready)
             opener = fake_openai_search(self.LISTINGS, ["https://www.mudah.my/rumah-sp-777.htm"])
             with mock.patch("listingai.websearch.urllib.request.urlopen", opener):
-                self.assertEqual(app.search_web_now(), "Ran 1 search: 1 new listing added, 1 in your campaigns.")
+                self.assertEqual(app.search_web_now(), "Ran 1 search: 2 new listings added, 1 in your campaigns.")
+            self.assertIn("link not confirmed", app.listings[1].source)
             l = app.listings[0]
             self.assertIsNone(l.public_phone)
             self.assertFalse(l.has_eligible_contact)
             self.assertIn("Automatic", app.settings_page())
+            self.assertIn("AI returned 3", app.settings_page())
+
+    def test_prose_answer_is_explained(self):
+        from listingai.websearch import run_openai_search
+
+        def opener(req, timeout=None):
+            return _Resp(json.dumps({"output": [{"type": "message", "content": [
+                {"type": "output_text", "text": "I could not find any recent listings.", "annotations": []}]}]}).encode())
+        run = run_openai_search(["Kulim"], "sk", "m", opener=opener)
+        self.assertIn("without a list: I could not find", run.notes[0])
 
 
 class AppFlow(unittest.TestCase):

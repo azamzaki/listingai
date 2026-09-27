@@ -48,12 +48,14 @@ class WebResult:
     price: Optional[int]
     location: Optional[str]
     query: str
+    confirmed: bool = True  # False: the search visited this site but did not cite this exact link
 
 
 @dataclass
 class SearchRun:
     results: list[WebResult] = field(default_factory=list)
     queries: list[tuple[str, int]] = field(default_factory=list)  # (query, results kept)
+    notes: list[str] = field(default_factory=list)  # one explanation per query, same order
     next_cursor: int = 0
 
 
@@ -188,6 +190,10 @@ def _openai_search(places: list[str], api_key: str, model: str, opener: Optional
     return "\n".join(texts), cited
 
 
+_LISTING_SITES = {"mudah.my", "propertyguru.com.my", "iproperty.com.my", "edgeprop.my", "ibilik.my",
+                  "facebook.com", "m.facebook.com", "propsocial.my", "durianproperty.com.my"}
+
+
 def _norm_url(url: str) -> str:
     p = urllib.parse.urlparse(url.strip())
     query = "&".join(q for q in p.query.split("&") if q and not q.startswith("utm_"))
@@ -210,25 +216,41 @@ def run_openai_search(places: Iterable[str], api_key: str, model: str, cursor: i
     for group in batch:
         text, cited = _openai_search(group, api_key, model, opener)
         cited_norm = {_norm_url(u) for u in cited}
+        # Hosts the search actually visited. A listing link on one of these sites is kept even when the
+        # search cited a results page instead of the ad itself; a link on any other site must be cited exactly.
+        cited_hosts = {urllib.parse.urlparse(u).netloc.lower().removeprefix("www.") for u in cited}
         match = re.search(r"\{.*\}", text, re.S)
         try:
             listings = json.loads(match.group(0)).get("listings", []) if match else []
         except (json.JSONDecodeError, AttributeError):
             listings = []
-        kept = 0
-        for item in listings if isinstance(listings, list) else []:
+        if not isinstance(listings, list):
+            listings = []
+        kept = uncited = not_listing = 0
+        for item in listings:
             url = str(item.get("url") or "")
-            if not url.startswith("http") or _norm_url(url) not in cited_norm or url in seen:
-                continue  # a link the search did not return may be made up
+            host = urllib.parse.urlparse(url).netloc.lower().removeprefix("www.")
+            if not url.startswith("http") or url in seen:
+                continue
+            if _norm_url(url) not in cited_norm and not (host in cited_hosts and host in _LISTING_SITES):
+                uncited += 1  # a link the search did not return may be made up
+                continue
             title, desc = _clean(str(item.get("title") or "")), _clean(str(item.get("description") or ""))
             if not looks_like_listing(title, desc, url):
+                not_listing += 1
                 continue
             seen.add(url)
             price = item.get("price_rm")
             price = int(price) if isinstance(price, (int, float)) and 1_000 <= price <= 100_000_000 else find_price(f"{title} {desc}")
             loc = find_location(f"{item.get('location') or ''} {title} {desc}", group)
-            run.results.append(WebResult(title, url, desc, price, loc, "OpenAI: " + ", ".join(group)))
+            run.results.append(WebResult(title, url, desc, price, loc, "OpenAI: " + ", ".join(group),
+                                         confirmed=_norm_url(url) in cited_norm))
             kept += 1
         run.queries.append(("OpenAI web search: " + ", ".join(group), kept))
+        if not match:
+            note = "The AI answered without a list: " + " ".join(text.split())[:160]
+        else:
+            note = f"AI returned {len(listings)}; {uncited} dropped (link not from the search), {not_listing} dropped (not a sale listing)"
+        run.notes.append(note + f"; {len(cited)} links cited by the search")
     run.next_cursor = (start + len(batch)) % len(groups)
     return run
