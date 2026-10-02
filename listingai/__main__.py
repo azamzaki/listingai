@@ -78,10 +78,40 @@ def serve_main(argv: list[str]) -> None:
     serve(args.port, Path(args.csv) if args.csv else None, not args.no_open)
 
 
+def fetch_main(argv: list[str]) -> None:
+    from .leads.pipeline import RunOptions, run_pipeline
+
+    parser = argparse.ArgumentParser(
+        prog="python -m listingai fetch",
+        description="Find owner listings in Penang and Kedah on Mudah and store them, logging every stage.")
+    parser.add_argument("--region", action="append", choices=["Penang", "Kedah"],
+                        help="region to search (repeat for both; default: both)")
+    parser.add_argument("--pages", type=int, default=2, help="search-result pages per region (default 2)")
+    parser.add_argument("--details", type=int, default=30, help="ad pages to open per run, new listings only (default 30)")
+    parser.add_argument("--delay", type=float, default=4.0, help="seconds between requests (minimum 2, default 4)")
+    parser.add_argument("--save-html", action="store_true", help="keep every downloaded page in the debug folder")
+    parser.add_argument("--from-file", action="append", default=[], metavar="PAGE.html",
+                        help="process a Mudah search page you saved from your browser instead of downloading")
+    parser.add_argument("--search", action="append", default=[], metavar="REGION=/path",
+                        help="override a search address, e.g. Penang=/penang/houses-for-sale")
+    parser.add_argument("-v", "--verbose", action="store_true", help="also print per-listing details")
+    args = parser.parse_args(argv)
+    opts = RunOptions(regions=tuple(args.region or ("Penang", "Kedah")), max_pages=args.pages,
+                      max_details=args.details, delay=args.delay, save_html=args.save_html,
+                      from_files=tuple(args.from_file), verbose=args.verbose)
+    for item in args.search:
+        region, _, path = item.partition("=")
+        opts.searches[region.strip()] = path.strip()
+    result = run_pipeline(opts)
+    print(f"\nRESULT ({result['status']}): {result['diagnosis']}")
+
+
 def main(argv: list[str] | None = None) -> None:
     argv = sys.argv[1:] if argv is None else argv
     if argv[:1] == ["serve"]:
         return serve_main(argv[1:])
+    if argv[:1] == ["fetch"]:
+        return fetch_main(argv[1:])
     parser = argparse.ArgumentParser(prog="python -m listingai", description="Build the ListingAI dashboard.")
     parser.add_argument("csv", nargs="?", default="examples/sample_listings.csv", help="listings CSV (default: examples/sample_listings.csv)")
     parser.add_argument("-o", "--output", default="dashboard.html", help="output HTML file (default: dashboard.html)")

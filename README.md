@@ -11,6 +11,31 @@ No third-party dependencies (Python 3.10+). Run tests with:
 python3 -m unittest
 ```
 
+## Owner-lead pipeline (Mudah · Penang & Kedah)
+
+```sh
+python -m listingai fetch                 # both regions, 2 result pages each, logs every stage
+python -m listingai fetch --region Penang --pages 1 -v
+python -m listingai fetch --from-file saved-mudah-page.html --region Kedah   # parse a page saved from your browser
+```
+
+Or use **Owner Leads** in the app (`python -m listingai serve`): Run search now, optional automatic runs, and
+tabs **New Owner Leads | High Priority | Reviewed | Rejected Agent | Filtered out**, each rejected listing showing
+its reason (e.g. `Rejected — REN number detected (REN 31234)`).
+
+Stages: **FETCH** (robots.txt obeyed, ≥2 s between requests, honest User-Agent, no login; a 403/429/CAPTCHA is
+reported and the run stops for the site) → **PARSE** (`__NEXT_DATA__`, then JSON-LD, then ad links; pages with no
+listings are saved to `debug/`) → **FILTER** (residential, for sale, Penang/Kedah) → **CLASSIFY** → **STORE**
+(SQLite `listingai.db`, deduplicated by ad URL and by title+price+area). Each run ends with one sentence saying
+where it stopped when nothing was found; events are in the database, the run page and `logs/pipeline-YYYYMMDD.log`.
+
+Owner Confidence: **VERY HIGH** (95) private advertiser + owner wording · **HIGH** (80) private advertiser, no
+agent signals · **MEDIUM** (45–60) no advertiser label · **LOW** (5–20, rejected) REN number, agency name/brand,
+company advertiser or agent wording ("co-broke"). Opportunity Score (owner listings): listing age, urgent wording,
+price drop (seen across runs) or price-reduction wording, short/missing description, no price, negotiable.
+High Priority = owner ≥ 80 and opportunity ≥ 60. Only public listing content is read; phone numbers are not
+extracted and sellers are never contacted.
+
 ## Run the app
 
 ```sh

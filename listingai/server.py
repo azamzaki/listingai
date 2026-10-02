@@ -29,6 +29,8 @@ from .exclusive_agent import classify_exclusive_agent
 from .examples import is_example
 from .extract import extract_listing, extract_with_rules, split_posts
 from .mailalerts import SITES, MailError, fetch_alert_items
+from .leads import db as leads_db
+from .leads.web import LeadsRunner, leads_page, run_log_page
 from .websearch import SearchError, run_openai_search, run_search
 from .llm import OpenAIError, classify_with_ai, test_api_key
 from .models import EvidenceSource, ExclusiveAgentStatus as S, Listing, TextEvidence
@@ -96,6 +98,7 @@ class App:
         self.flash: Optional[tuple[str, bool]] = None
         self.last_report: Optional[dict] = None
         self.last_web_report: Optional[dict] = None
+        self.leads_runner = LeadsRunner()
         self.settings: Settings = load_settings()
         self.campaigns: list[Campaign] = load_campaigns()
         stored = load_store() or []
@@ -138,7 +141,7 @@ class App:
 
     # --- pages ------------------------------------------------------------
     def nav(self, current: str) -> str:
-        links = [("/", "Dashboard"), ("/add", "Add listing"), ("/import", "Import posts"), ("/campaigns", "Campaigns"), ("/settings", "Settings")]
+        links = [("/", "Dashboard"), ("/leads", "Owner Leads"), ("/add", "Add listing"), ("/import", "Import posts"), ("/campaigns", "Campaigns"), ("/settings", "Settings")]
         out = "".join(
             f'<a href="{href}"{" class=primary" if href == current else ""}>{label}</a>' for href, label in links
         )
@@ -846,6 +849,16 @@ def make_handler(app: App):
                     return self._send(200, app.campaigns_page(q.get("edit", [""])[0]))
                 if url.path == "/add":
                     return self._send(200, app.add_page({k: v[0] for k, v in q.items()}))
+                if url.path == "/leads":
+                    tab = q.get("tab", ["new"])[0]
+                    return self._send(200, app.shell("Owner Leads", "/leads",
+                                                     leads_page(tab, app.csrf, app.leads_runner, app.settings.leads_auto_hours)))
+                if url.path == "/leads/run":
+                    try:
+                        run_id = int(q.get("id", ["0"])[0])
+                    except ValueError:
+                        run_id = 0
+                    return self._send(200, app.shell(f"Run #{run_id}", "/leads", run_log_page(run_id)))
                 if url.path == "/import":
                     return self._send(200, app.import_page())
             self._send(404, "Not found")
@@ -859,6 +872,26 @@ def make_handler(app: App):
             if not secrets.compare_digest(form.get("csrf", ""), app.csrf):
                 return self._send(403, "This form has expired. Go back and reload the page.")
             path = urlparse(self.path).path
+            if path == "/leads/run":
+                started = app.leads_runner.start()
+                with app.lock:
+                    app.say("Search started. It waits a few seconds between pages, so allow 1–3 minutes, then refresh."
+                            if started else "A search is already running.", error=not started)
+                return self._send(303, location="/leads")
+            if path == "/leads/status":
+                tab = form.get("tab", "new")
+                if form.get("status") in ("new", "reviewed", "rejected_agent") and form.get("id", "").isdigit():
+                    leads_db.set_status(int(form["id"]), form["status"])
+                return self._send(303, location=f"/leads?tab={quote(tab)}")
+            if path == "/leads/auto":
+                try:
+                    app.settings.leads_auto_hours = int(form.get("hours", "0"))
+                except ValueError:
+                    app.settings.leads_auto_hours = 0
+                save_settings(app.settings)
+                with app.lock:
+                    app.say("Automatic search " + (f"every {app.settings.leads_auto_hours} hours." if app.settings.leads_auto_hours else "turned off."))
+                return self._send(303, location="/leads")
             if path == "/settings/web/run":
                 message = app.search_web_now()
                 with app.lock:
@@ -916,6 +949,7 @@ def _background_loop(app: App, tick: float = 60.0) -> None:
     import time
 
     last_email = 0.0
+    last_leads = time.time()  # first automatic owner-lead run one interval after start-up
     # First web search shortly after start-up unless one ran within the chosen interval.
     last_web = 0.0
     if app.settings.web_last_run:
@@ -930,6 +964,10 @@ def _background_loop(app: App, tick: float = 60.0) -> None:
         if s.email_address and s.email_app_password and s.email_check_minutes and now - last_email >= s.email_check_minutes * 60:
             last_email = now
             print(f"[{datetime.now():%H:%M}] Email alerts: {app.check_email_now()}")
+        if s.leads_auto_hours and now - last_leads >= s.leads_auto_hours * 3600:
+            last_leads = now
+            if app.leads_runner.start():
+                print(f"[{datetime.now():%H:%M}] Owner leads: automatic search started")
         if s.web_search_ready and s.web_search_hours and now - last_web >= s.web_search_hours * 3600:
             last_web = now
             print(f"[{datetime.now():%H:%M}] Web search: {app.search_web_now()}")

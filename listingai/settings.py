@@ -51,6 +51,8 @@ class Settings:
     web_search_hours: int = 12  # 0 = only when "Search the web now" is clicked
     web_cursor: int = 0
     web_last_run: str = ""
+    # Owner-lead pipeline (Mudah, Penang & Kedah).
+    leads_auto_hours: int = 0  # 0 = run by hand
 
     @property
     def effective_key(self) -> str:
@@ -100,6 +102,7 @@ def load_settings() -> Settings:
         web_search_hours=int(raw.get("web_search_hours", defaults.web_search_hours)),
         web_cursor=int(raw.get("web_cursor", 0)),
         web_last_run=raw.get("web_last_run", ""),
+        leads_auto_hours=int(raw.get("leads_auto_hours", 0)),
     )
 
 
