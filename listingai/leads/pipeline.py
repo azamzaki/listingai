@@ -160,9 +160,15 @@ def run_pipeline(opts: Optional[RunOptions] = None, fetcher: Optional[Fetcher] =
                 continue  # known listing: no need to open it again
             if item.description and item.advertiser_type and item.posted_at:
                 continue
+            if opened == 0:
+                todo = min(opts.max_details, sum(1 for _, x in found if db.get_by_url(con, x.url) is None))
+                run.event("fetch", "info", f"Opening up to {todo} new ad pages for details "
+                                           f"(about {int(todo * opts.delay)}s with the {opts.delay}s wait between requests)")
             res = fetcher.get(item.url)
             opened += 1
             run.counts["ad_pages_requested"] += 1
+            if run.printer:
+                run.printer(f"FETCH    - ad page {opened}: {'ok' if res.ok else res.error} — {item.title[:60]}")
             if not res.ok:
                 run.event("fetch", "warn", f"Ad page not opened ({res.error}): {item.url}")
                 if res.kind in ("blocked", "robots"):
