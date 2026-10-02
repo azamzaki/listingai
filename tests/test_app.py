@@ -341,7 +341,7 @@ class WebApp(unittest.TestCase):
 
     def test_starts_empty(self):
         self.assertEqual(self.app.listings, [])
-        self.assertIn("No listings yet", self.get("/"))
+        self.assertIn("Owner Leads</a> page", self.get("/"))
 
     def test_skips_port_where_another_program_answers(self):
         import socket
