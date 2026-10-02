@@ -983,10 +983,10 @@ def serve(port: int = 8321, import_csv: Optional[Path] = None, open_browser: boo
     app.base_url = url
     if actual != port:
         print(f"Port {port} is used by another program, so ListingAI is using port {actual} instead.")
-    print(f"ListingAI is running at {url}\nPress Ctrl+C to stop.")
+    print(f"ListingAI is running at {url}\nOwner leads from Mudah: {url}leads\nPress Ctrl+C to stop.")
     threading.Thread(target=_background_loop, args=(app,), daemon=True).start()
     if open_browser:
-        webbrowser.open(url)
+        webbrowser.open(url + "leads")
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
